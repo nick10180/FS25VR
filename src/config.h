@@ -19,6 +19,10 @@ struct Config {
     bool  forceRender     = false;  // debug: do the full VR copy even when the headset is idle
     bool  deferPatches    = false;  // debug: skip the load-time engine scan (simulates a DRM-wrapped exe)
     bool  debugLog        = false;  // verbose per-frame logging
+    // quad views (plane stereo, F11 menu): each eye's focus view, as the quad views layer without eye tracking
+    float quadFocusWidth   = 0.5f;   // fraction of the eye's horizontal field of view (centred)
+    float quadFocusHeight  = 0.45f;  // ... vertical
+    float quadFocusSmoothing = 0.18f; // blended edge of the focus view (fraction of its size)
 };
 
 extern Config g_config;

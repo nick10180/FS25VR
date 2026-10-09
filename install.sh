@@ -86,7 +86,18 @@ done
 game_dir="$(realpath "$game_dir")"
 x64="$game_dir/x64"
 
-if pgrep -f 'FarmingSimulator2025(Game)?\.exe' >/dev/null 2>&1; then
+# The game's process is the exe itself (argv[0], a Windows or Unix path to it). Matching whole command
+# lines (pgrep -f) would also find any shell command that merely mentions the exe's name.
+game_running() {
+    local f a0
+    for f in /proc/[0-9]*/cmdline; do
+        IFS= read -r -d '' a0 < "$f" 2>/dev/null || continue
+        [[ "${a0##*[\\/]}" =~ ^FarmingSimulator2025(Game)?\.exe$ ]] && return 0
+    done
+    return 1
+}
+
+if game_running; then
     die "Farming Simulator 25 is running. Close the game first, then try again."
 fi
 

@@ -1,6 +1,7 @@
 #include "config.h"
 #include "log.h"
 #include <windows.h>
+#include <algorithm>
 #include <string>
 
 Config g_config;
@@ -39,10 +40,15 @@ void LoadConfig()
     g_config.forceRender  = ReadInt(f, L"forceRender", 0) != 0;
     g_config.deferPatches = ReadInt(f, L"deferPatches", 0) != 0;
     g_config.debugLog     = ReadInt(f, L"debugLog", 0) != 0;
+    g_config.quadFocusWidth   = std::clamp(ReadFloat(f, L"quadFocusWidth", 0.5f), 0.1f, 1.0f);
+    g_config.quadFocusHeight  = std::clamp(ReadFloat(f, L"quadFocusHeight", 0.45f), 0.1f, 1.0f);
+    g_config.quadFocusSmoothing = std::clamp(ReadFloat(f, L"quadFocusSmoothing", 0.18f), 0.0f, 0.5f);
     if (g_config.worldScale <= 0.01f) g_config.worldScale = 1.0f;
 
     Log("config: enabled=%d forceNoVsync=%d presentLag=%d worldScale=%.2f menu=%.1fm/%.1fm fitWindow=%d syncEyes=%d/%d eyeOrder=%d symmetric=%d async=%d debug=%d",
         g_config.enabled, g_config.forceNoVsync, g_config.presentLag, g_config.worldScale,
         g_config.menuDistance, g_config.menuWidth, g_config.fitWindow, g_config.syncEyes, g_config.syncPhase,
         g_config.eyeOrder, g_config.symmetricFrustum, g_config.asyncSubmit, g_config.debugLog);
+    Log("config: quad views focus %.2f x %.2f of the field of view, edge %.2f", g_config.quadFocusWidth,
+        g_config.quadFocusHeight, g_config.quadFocusSmoothing);
 }

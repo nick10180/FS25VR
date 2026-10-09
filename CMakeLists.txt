@@ -22,6 +22,8 @@ add_library(dinput8 SHARED
     src/hooks.cpp
     src/game.cpp
     src/xr.cpp
+    src/overlay.cpp
+    src/planes.cpp
     src/blit.cpp
     src/window.cpp
     src/sync.cpp

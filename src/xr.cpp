@@ -10,6 +10,8 @@
 #include "xr.h"
 #include "blit.h"
 #include "config.h"
+#include "overlay.h"
+#include "planes.h"
 #include "log.h"
 #include "profile.h"
 #include "window.h"
@@ -27,13 +29,18 @@
 namespace {
 
 constexpr int kRing = 16;
-constexpr int kAllocs = 3;
+constexpr int kAllocs = 12;  // copies of three frames in flight (quad views: 4 per frame)
 
 struct FrameRecord {
     uint64_t frame = ~0ull;
     int      eye = 0;
     XrPosef  pose{};   // raw LOCAL-space pose the image is rendered from
     XrFovf   fov{};    // frustum actually rendered (may be wider than the eye's)
+    bool     hasOther = false; // plane stereo: the right eye, rendered as the engine's second view
+    XrPosef  otherPose{};
+    XrFovf   otherFov{};
+    bool     hasFocus = false; // quad views: both eyes' focus views as the engine's third and fourth view
+    XrFovf   focusFov[2]{};
 };
 
 struct Chain {
@@ -113,6 +120,13 @@ struct State {
     XrView         pairViews[2] = {{XR_TYPE_VIEW}, {XR_TYPE_VIEW}};  // the pair's view query
     XrTime         pairTime = 0;         // display time it was made for
     uint64_t       pairViewFrame = ~0ull;
+    // Plane stereo: the left eye is the game camera every frame, the right eye a second view of the
+    // engine's main render path into a render overlay's texture, so every frame is a stereo pair
+    bool           planeStereo = false;
+    // Quad views: two more engine views, a narrower field of view at a higher pixel density per eye,
+    // laid over the eyes' images (at the headset's recommended density) before they are submitted
+    int            ovCount = 0;              // render overlays: 1 = right eye, 3 = + both focus views
+    UINT           ovW[3] = {}, ovH[3] = {};  // their sizes
     int            readySet = 0;         // staging textures holding it
     XrPosef        readyPose[2]{};
     XrFovf         readyFov[2]{};
@@ -553,9 +567,11 @@ bool CreateChain(Chain& c, uint32_t w, uint32_t h, UINT rtvOffset, UINT stagingR
     return true;
 }
 
-bool EnsureSwapchains(UINT w, UINT h)
+// the eyes' swapchains at w x h, the menu screen's at menuW x menuH
+bool EnsureSwapchains(UINT w, UINT h, UINT menuW, UINT menuH)
 {
-    if (S.eyes[0].handle && S.eyes[0].w == w && S.eyes[0].h == h) return true;
+    if (S.eyes[0].handle && S.eyes[0].w == w && S.eyes[0].h == h && S.quad.w == menuW && S.quad.h == menuH)
+        return true;
     if (S.compUsingChains) return false;  // compositor is submitting them; rebuild on a later frame
     DestroySwapchains();
     D3D12_DESCRIPTOR_HEAP_DESC hd = {};
@@ -565,10 +581,36 @@ bool EnsureSwapchains(UINT w, UINT h)
     S.rtvInc = S.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
     int sets = S.async ? 2 : 0;
     if (!CreateChain(S.eyes[0], w, h, 0, 24, sets) || !CreateChain(S.eyes[1], w, h, 8, 26, sets) ||
-        !CreateChain(S.quad, w, h, 16, 28, S.async ? 1 : 0))
+        !CreateChain(S.quad, menuW, menuH, 16, 28, S.async ? 1 : 0))
         return false;
-    Log("OpenXR swapchains created %ux%u", w, h);
+    Log("OpenXR swapchains created %ux%u (menu %ux%u)", w, h, menuW, menuH);
     return true;
+}
+
+// Quad views: the focus view of an eye, as the quad views layer does it without eye tracking: a
+// section of the eye's field of view (fractions of its half extents) around straight ahead. Kept
+// centred (screen-space effects assume it), so clamped on the narrower side.
+XrFovf FocusFov(const XrFovf& eye)
+{
+    float l = tanf(eye.angleLeft), r = tanf(eye.angleRight);
+    float d = tanf(eye.angleDown), u = tanf(eye.angleUp);
+    float h = std::min({g_config.quadFocusWidth * 0.5f * (r - l), r, -l});
+    float v = std::min({g_config.quadFocusHeight * 0.5f * (u - d), u, -d});
+    return {atanf(-h), atanf(h), atanf(v), atanf(-v)};
+}
+
+// Where a focus view lies in its eye's image (w x h, rendered with the field of view `eye` from the same
+// camera), with the configured blended edge.
+BlitRect FocusRect(const XrFovf& eye, const XrFovf& focus, UINT w, UINT h)
+{
+    float l = tanf(eye.angleLeft), r = tanf(eye.angleRight), d = tanf(eye.angleDown), u = tanf(eye.angleUp);
+    BlitRect rc;
+    rc.x = (tanf(focus.angleLeft) - l) / (r - l) * (float)w;
+    rc.w = (tanf(focus.angleRight) - tanf(focus.angleLeft)) / (r - l) * (float)w;
+    rc.y = (u - tanf(focus.angleUp)) / (u - d) * (float)h;
+    rc.h = (tanf(focus.angleUp) - tanf(focus.angleDown)) / (u - d) * (float)h;
+    rc.smoothing = g_config.quadFocusSmoothing;
+    return rc;
 }
 
 void BeginFrame()
@@ -723,7 +765,8 @@ void RecordMirror(ID3D12Resource* bb, Mirror mode)
 }
 
 bool CopyToChain(Chain& chain, ID3D12Resource* bb, DXGI_FORMAT bbFormat, bool sampleMarker = false,
-                 Mirror mirror = Mirror::None, const CursorDraw* cursor = nullptr)
+                 Mirror mirror = Mirror::None, const CursorDraw* cursor = nullptr,
+                 D3D12_RESOURCE_STATES srcState = D3D12_RESOURCE_STATE_PRESENT, const BlitRect* over = nullptr)
 {
     // Async mode draws into the chain's staging texture and never calls OpenXR here: on some
     // runtimes (Quest via Steam Link) swapchain calls block until the next headset refresh, which
@@ -758,8 +801,9 @@ bool CopyToChain(Chain& chain, ID3D12Resource* bb, DXGI_FORMAT bbFormat, bool sa
     b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     b.Transition.pResource = bb;
     b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    b.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+    b.Transition.StateBefore = srcState;
     b.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    const bool transition = srcState != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 
     int markerSlot = -1;
     if (sampleMarker && S.readback && S.sampleCount < 8 && IsCalibFormat(bbFormat)) {
@@ -780,16 +824,16 @@ bool CopyToChain(Chain& chain, ID3D12Resource* bb, DXGI_FORMAT bbFormat, bool sa
         b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
         b.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
     }
-    S.cl->ResourceBarrier(1, &b);
+    if (transition || markerSlot >= 0) S.cl->ResourceBarrier(1, &b);
 
     D3D12_CPU_DESCRIPTOR_HANDLE rtv = chain.rtvBase;
     rtv.ptr += (SIZE_T)idx * S.rtvInc;
     if (S.async) rtv = chain.stagingRtv[chain.writeSet];
-    S.blit.Record(S.cl, bb, bbFormat, rtv, chain.w, chain.h, cursor);
+    S.blit.Record(S.cl, bb, bbFormat, rtv, chain.w, chain.h, cursor, over);
 
     b.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-    b.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
-    S.cl->ResourceBarrier(1, &b);
+    b.Transition.StateAfter = srcState;
+    if (transition) S.cl->ResourceBarrier(1, &b);
     RecordMirror(bb, mirror);
     S.cl->Close();
     ID3D12CommandList* lists[] = {S.cl};
@@ -840,6 +884,26 @@ void ComputeProjection(const XrFovf& eye, float aspect, EyeView& out, XrFovf& re
     rendered.angleRight = atanf(cx + halfW);
     rendered.angleDown = atanf(cy - halfH);
     rendered.angleUp = atanf(cy + halfH);
+}
+
+// Size of the eyes' images handed to the runtime: the headset's recommended pixel density over the
+// frustum rendered for a w x h image. Streaming runtimes scale every image to their stream size
+// without averaging, so extra pixels would be skipped (no anti-aliasing from them); the bridge
+// averages them itself instead. Smaller images stay as they are, except with quad views (the eye's
+// image is scaled up there, for the focus view laid over it).
+void EyeImageSize(UINT w, UINT h, bool scaleUp, UINT& outW, UINT& outH)
+{
+    outW = w, outH = h;
+    if (!S.recW || S.pairViewFrame == ~0ull) return;
+    const XrFovf& eye = S.pairViews[0].fov;
+    EyeView unused;
+    XrFovf rendered;
+    ComputeProjection(eye, (float)w / (float)h, unused, rendered);
+    float tw = (tanf(rendered.angleRight) - tanf(rendered.angleLeft)) / (tanf(eye.angleRight) - tanf(eye.angleLeft));
+    UINT rw = ((UINT)((float)S.recW * tw) + 7) & ~7u;
+    if (rw >= w && !scaleUp) return;
+    outW = rw;
+    outH = ((UINT)((float)rw * (float)h / (float)w) + 7) & ~7u;
 }
 
 // Debug: writes the backbuffer (half resolution) to x64\fs25vr_dump_<frame>_eye<n>.bmp. Stalls the GPU.
@@ -965,6 +1029,7 @@ void OnSwapChainCreated(ID3D12CommandQueue* queue, IDXGISwapChain* swap)
         S.queue = queue;
     }
     Log("swap chain created (queue %p, device %p)", queue, dev);
+    overlay::Install(dev);
     prof::Init(dev, queue);
     prof::HookQueue(queue);
 }
@@ -985,6 +1050,7 @@ void OnPresent(IDXGISwapChain* swap)
         S.tGame += S.cur.game;
     }
     prof::GameWorkDone(S.curFrame);
+    overlay::OnFrameEnd();
     OnPresentImpl(swap, onPresentStart);
     prof::VrWorkDone(S.curFrame);
     S.tPresentStart = Now();
@@ -1007,7 +1073,10 @@ void CopyFrame(IDXGISwapChain* swap)
     S.bbW = (UINT)desc.Width;
     S.bbH = desc.Height;
 
-    if ((S.shouldRender || g_config.forceRender || S.async) && EnsureSwapchains(S.bbW, S.bbH)) {
+    const bool quad = S.planeStereo && S.ovCount == 3;
+    UINT eyeW, eyeH;
+    EyeImageSize(S.bbW, S.bbH, quad, eyeW, eyeH);
+    if ((S.shouldRender || g_config.forceRender || S.async) && EnsureSwapchains(eyeW, eyeH, S.bbW, S.bbH)) {
         // the game draws the OS cursor, which is not part of the backbuffer; draw one into the copy
         CursorDraw cursor;
         if (g_config.showCursor && CursorInBackbuffer(S.bbW, S.bbH, cursor.x, cursor.y)) {
@@ -1033,7 +1102,58 @@ void CopyFrame(IDXGISwapChain* swap)
             }
             const bool closer = IsSecondOfPair(rec.frame);  // completes a pair
             if (S.async && !closer) S.pairMask = 0;  // a new pair starts
-            if (CopyToChain(S.eyes[rec.eye], bb, desc.Format, S.calibrating, m, &cursor)) {
+            DXGI_FORMAT ovFormat = DXGI_FORMAT_UNKNOWN;
+            D3D12_RESOURCE_STATES ovState = D3D12_RESOURCE_STATE_COMMON;
+            ID3D12Resource* ovImage = rec.hasOther && S.async && !S.calibrating
+                                          ? overlay::Image(0, ovFormat, ovState)
+                                          : nullptr;
+            // quad views: the focus views' images, laid over the eyes' images
+            ID3D12Resource* fImage[2] = {};
+            DXGI_FORMAT fFormat[2] = {};
+            D3D12_RESOURCE_STATES fState[2] = {};
+            if (ovImage && rec.hasFocus && quad) {
+                for (int e = 0; e < 2; e++) fImage[e] = overlay::Image(1 + e, fFormat[e], fState[e]);
+                if (!fImage[0] || !fImage[1]) ovImage = nullptr;
+            }
+            if (rec.hasOther && !ovImage) {
+                // plane stereo, but no right-eye image (yet): keep showing the last pair
+                S.pairMask = 0;
+            } else if (ovImage) {
+                // both eyes of this frame: the window's image and the overlay texture's
+                // The main pipeline writes its already encoded output through the texture's sRGB
+                // view, encoding twice: read through the sRGB view.
+                auto readable = [](DXGI_FORMAT& f) {
+                    if (f == DXGI_FORMAT_R8G8B8A8_TYPELESS) f = DXGI_FORMAT_R8G8B8A8_UNORM;
+                    if (f == DXGI_FORMAT_B8G8R8A8_TYPELESS) f = DXGI_FORMAT_B8G8R8A8_UNORM;
+                    if (f == DXGI_FORMAT_R10G10B10A2_TYPELESS) f = DXGI_FORMAT_R10G10B10A2_UNORM;
+                };
+                readable(ovFormat);
+                bool okL = CopyToChain(S.eyes[0], bb, desc.Format, false, m, &cursor);
+                // Plane stereo renders the right eye from the left eye's camera moved by the eye
+                // offset, without the (tiny) rotation between the eyes: shown with that pose.
+                XrPosef otherPose = rec.otherPose;
+                otherPose.orientation = rec.pose.orientation;
+                bool okR = okL && CopyToChain(S.eyes[1], ovImage, ovFormat, false, Mirror::None, nullptr, ovState);
+                // quad views: each eye's focus view over its image
+                bool okF = true;
+                for (int e = 0; okR && fImage[0] && e < 2; e++) {
+                    readable(fFormat[e]);
+                    BlitRect rc = FocusRect(e ? rec.otherFov : rec.fov, rec.focusFov[e], S.eyes[e].w, S.eyes[e].h);
+                    okF = okF && CopyToChain(S.eyes[e], fImage[e], fFormat[e], false, Mirror::None, nullptr,
+                                             fState[e], &rc);
+                }
+                if (okL && okR && okF) {
+                    int set = S.eyes[0].writeSet;
+                    S.readySet = set;
+                    S.readyPose[0] = rec.pose;
+                    S.readyFov[0] = rec.fov;
+                    S.readyPose[1] = otherPose;
+                    S.readyFov[1] = rec.otherFov;
+                    S.eyes[0].writeSet = S.eyes[1].writeSet = set ^ 1;
+                    S.pairReady = true;
+                }
+                S.pairMask = 0;
+            } else if (CopyToChain(S.eyes[rec.eye], bb, desc.Format, S.calibrating, m, &cursor)) {
                 if (S.async) {  // the compositor submits complete pairs (and sets eyeValid/eyePose)
                     S.pairMask |= 1 << rec.eye;
                     S.pairPose[rec.eye] = rec.pose;
@@ -1488,7 +1608,8 @@ bool GetView(EyeView& out)
         return true;
     }
 
-    int eye = EyeOfFrame(target);
+    const bool ovStereo = S.planeStereo && S.ovCount;
+    int eye = ovStereo ? 0 : EyeOfFrame(target);
     XrViewLocateInfo li{XR_TYPE_VIEW_LOCATE_INFO};
     li.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
     li.displayTime = S.predictedTime + (XrTime)(S.lag + (S.async ? 1 : 0)) * S.predictedPeriod;
@@ -1498,7 +1619,7 @@ bool GetView(EyeView& out)
     // between the two renders, display times a whole headset frame apart); streaming runtimes that
     // reproject with a single head pose then show the other eye jittering.
     XrView views[2] = {{XR_TYPE_VIEW}, {XR_TYPE_VIEW}};
-    if (S.async && IsSecondOfPair(target) && S.pairViewFrame == target - 1) {
+    if (S.async && !ovStereo && IsSecondOfPair(target) && S.pairViewFrame == target - 1) {
         views[0] = S.pairViews[0];
         views[1] = S.pairViews[1];
         if (li.displayTime != S.pairTime) S.statPairsAligned++;
@@ -1519,6 +1640,33 @@ bool GetView(EyeView& out)
     rec.eye = eye;
     rec.pose = views[eye].pose;
     ComputeProjection(views[eye].fov, (float)S.bbW / (float)S.bbH, out, rec.fov);
+    rec.hasOther = ovStereo;
+    if (ovStereo) {
+        // the right eye as the engine's second view (the overlay texture's aspect), offset from the
+        // left eye's camera
+        EyeView o{};
+        rec.otherPose = views[1].pose;
+        ComputeProjection(views[1].fov, (float)S.ovW[0] / (float)S.ovH[0], o, rec.otherFov);
+        float sc = g_config.worldScale;
+        XrPosef rel = PoseCompose(PoseInverse(views[0].pose), views[1].pose);
+        float off[3] = {rel.position.x * sc, rel.position.y * sc, rel.position.z * sc};
+        auto tans = [](const XrFovf& f, float t[4]) {
+            t[0] = tanf(f.angleLeft), t[1] = tanf(f.angleRight), t[2] = tanf(f.angleDown), t[3] = tanf(f.angleUp);
+        };
+        float t[4];
+        tans(rec.otherFov, t);
+        planes::SetPlaneView(1, off, t);
+        rec.hasFocus = S.ovCount == 3;
+        if (rec.hasFocus) {
+            // each eye's focus view, from that eye's camera
+            const float none[3] = {};
+            for (int e = 0; e < 2; e++) {
+                rec.focusFov[e] = FocusFov(views[e].fov);
+                tans(rec.focusFov[e], t);
+                planes::SetPlaneView(2 + e, e ? off : none, t);
+            }
+        }
+    }
 
     XrPosef p = PoseCompose(PoseInverse(S.recenter), views[eye].pose);
     float s = g_config.worldScale;
@@ -1531,7 +1679,7 @@ bool GetView(EyeView& out)
     out.quat[2] = p.orientation.z;
     out.quat[3] = p.orientation.w;
     out.frame = target;
-    out.second = IsSecondOfPair(target);
+    out.second = !ovStereo && IsSecondOfPair(target);
     S.cached = out;
     S.cachedFrame = target;
     return true;
@@ -1545,6 +1693,70 @@ void SetSymmetricFrustum(bool on)
     Log("symmetric frustum %s", on ? "on" : "off");
 }
 
+int PrepareOverlay(bool on, bool quad, float renderScale, uint32_t w[3], uint32_t h[3])
+{
+    std::lock_guard<std::recursive_mutex> lock(S.mtx);
+    if (S.planeStereo) {
+        planes::SetStereo(false);
+        S.planeStereo = false;
+    }
+    overlay::LockImage(false);
+    S.ovCount = 0;
+    if (on && S.bbW && S.bbH) {
+        // sizes no game render target has, all different (the bridge tells the overlays apart by size)
+        S.ovCount = 1;
+        S.ovW[0] = S.bbW + 32;
+        S.ovH[0] = S.bbH;
+        if (quad) {
+            // The engine renders every view at its render resolution (the window's times the 3D
+            // resolution scaling) and scales the result to the view's size: the focus views get that
+            // resolution, so their narrower field of view has the higher density
+            UINT rw = (UINT)((float)S.bbW * renderScale + 0.5f), rh = (UINT)((float)S.bbH * renderScale + 0.5f);
+            S.ovW[1] = rw + 16;
+            S.ovW[2] = rw + 48;
+            S.ovH[1] = S.ovH[2] = rh;
+            for (int e = 1; e < 3; e++)
+                while (S.ovW[e] == S.ovW[0] && S.ovH[e] == S.ovH[0]) S.ovW[e] += 8;
+            S.ovCount = 3;
+        }
+    }
+    for (int i = 0; i < 3; i++) {
+        w[i] = i < S.ovCount ? S.ovW[i] : 0;
+        h[i] = i < S.ovCount ? S.ovH[i] : 0;
+    }
+    S.cachedFrame = ~0ull;
+    overlay::SetSizes(S.ovCount, S.ovW, S.ovH);
+    if (S.ovCount == 3)
+        Log("stereo overlays prepared: right eye %ux%u, focus views %ux%u / %ux%u (%.2f x %.2f of the field of view, "
+            "render scale %.2f)", S.ovW[0], S.ovH[0], S.ovW[1], S.ovH[1], S.ovW[2], S.ovH[2], g_config.quadFocusWidth,
+            g_config.quadFocusHeight, renderScale);
+    else
+        Log("stereo overlay %s (%ux%u)", S.ovCount ? "prepared" : "off", w[0], h[0]);
+    return S.ovCount;
+}
+
+bool SetPlaneStereo(bool on)
+{
+    std::lock_guard<std::recursive_mutex> lock(S.mtx);
+    if (on && !S.ovCount) return false;
+    bool ok = planes::SetStereo(on, S.ovCount);
+    // the overlays' own output textures (they rendered by themselves until now) stay the views'
+    // images; the further views' pipelines create more targets of those sizes
+    overlay::LockImage(on && ok);
+    S.planeStereo = on && ok;
+    S.cachedFrame = ~0ull;
+    return ok;
+}
+
+void HeadsetInfo(uint32_t& recW, uint32_t& recH, float& focusW, float& focusH)
+{
+    std::lock_guard<std::recursive_mutex> lock(S.mtx);
+    recW = S.recW;
+    recH = S.recH;
+    focusW = g_config.quadFocusWidth;
+    focusH = g_config.quadFocusHeight;
+}
+
 void RequestRecenter()
 {
     std::lock_guard<std::recursive_mutex> lock(S.mtx);
@@ -1556,7 +1768,7 @@ bool NextFrameIsSecondEye()
     std::lock_guard<std::recursive_mutex> lock(S.mtx);
     if (!S.running || !S.lastWasStereo) return false;
     uint64_t next = S.presentCount + (uint64_t)S.lag;
-    return IsSecondOfPair(next);
+    return !S.planeStereo && IsSecondOfPair(next);
 }
 
 bool IsCalibrating()

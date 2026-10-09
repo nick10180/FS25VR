@@ -17,11 +17,23 @@ F6: projection centred / off-centre
 F7: ambient occlusion: game setting / force SAO
 F8: recentre the view
 F9: VR camera on/off
-F10: HUD on/off in VR (hidden by default)]]></en>
+F10: HUD on/off in VR (hidden by default)
+F11: VR settings (stereo mode, quad views, 3D resolution)]]></en>
     </description>
     <iconFilename>icon_vr.dds</iconFilename>
     <multiplayer supported="true" />
     <extraSourceFiles>
+        <sourceFile filename="scripts/VRSettingsDialog.lua" />
         <sourceFile filename="scripts/VRMain.lua" />
     </extraSourceFiles>
+    <l10n>
+        <text name="vr_settings_title"><en>VR settings</en><de>VR-Einstellungen</de></text>
+        <text name="vr_settings_stereoMode"><en>Stereo mode</en><de>Stereo-Modus</de></text>
+        <text name="vr_settings_modeAlternating"><en>Alternating eyes</en><de>Abwechselnde Augen</de></text>
+        <text name="vr_settings_modePlane"><en>Both eyes every frame</en><de>Beide Augen pro Frame</de></text>
+        <text name="vr_settings_modeQuad"><en>Both eyes + quad views</en><de>Beide Augen + Quad Views</de></text>
+        <text name="vr_settings_renderScale"><en>3D resolution</en><de>3D-Auflösung</de></text>
+        <text name="vr_settings_info"><en>Each view renders at %d x %d: %.2fx the headset's resolution</en><de>Jede Ansicht rendert mit %d x %d: %.2fx die Headset-Auflösung</de></text>
+        <text name="vr_settings_infoQuad"><en>Each view renders at %d x %d: middle %.2fx, edge %.2fx the headset's resolution</en><de>Jede Ansicht rendert mit %d x %d: Mitte %.2fx, Rand %.2fx die Headset-Auflösung</de></text>
+    </l10n>
 </modDesc>

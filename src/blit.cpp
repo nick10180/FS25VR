@@ -1,14 +1,17 @@
 #include "blit.h"
 #include "log.h"
 #include <d3dcompiler.h>
+#include <cmath>
 
 static const char* kShader = R"(
 cbuffer C : register(b0)
 {
-    float2 scale; float decode; float pad;
+    float2 scale; float decode; float smoothing;           // scale: 1 / source size; smoothing: blended edge
     float2 cursorPos; float cursorUnit; float cursorOn;   // cursor tip in source pixels, size of one arrow unit
+    float4 rect;                                          // destination rect (x, y, w, h) the source fills
 };
 Texture2D<float4> src : register(t0);
+SamplerState smp : register(s0);
 
 struct V { float4 pos : SV_Position; };
 
@@ -43,9 +46,24 @@ bool InArrow(float2 q)
 
 float4 ps(V i) : SV_Target
 {
-    float2 sp = i.pos.xy * scale;
-    float4 c = src.Load(int3(sp, 0));
+    float2 uv = (i.pos.xy - rect.xy) / rect.zw;
+    float2 sp = uv / scale;
+    // a smaller target: the average of all source texels in the target pixel (up to 4x4), not one
+    // bilinear sample (which skips texels and keeps their aliasing)
+    int2 n = clamp((int2)ceil(1 / (scale * rect.zw) - 0.01), 1, 4);
+    float2 step = 1 / (rect.zw * n);
+    float2 first = uv - 0.5 / rect.zw + 0.5 * step;
+    float4 c = 0;
+    for (int y = 0; y < n.y; y++)
+        for (int x = 0; x < n.x; x++) c += src.SampleLevel(smp, first + float2(x, y) * step, 0);
+    c /= n.x * n.y;
     c.rgb = saturate(c.rgb);
+    // the focus view laid over the eye's image: fades out towards its edges
+    float a = 1;
+    if (smoothing > 0) {
+        float2 e = smoothstep((float2)0, (float2)smoothing, uv) * smoothstep((float2)0, (float2)smoothing, 1 - uv);
+        a = e.x * e.y;
+    }
     if (cursorOn > 0.5) {
         float2 q = (sp - cursorPos) / cursorUnit;
         if (q.x > -2 && q.y > -2 && q.x < 14 && q.y < 21) {
@@ -58,7 +76,7 @@ float4 ps(V i) : SV_Target
         }
     }
     if (decode > 0.5) c.rgb = SrgbToLinear(c.rgb);
-    return float4(c.rgb, 1);
+    return float4(c.rgb, a);
 }
 )";
 
@@ -107,15 +125,22 @@ bool Blitter::Init(ID3D12Device* device, DXGI_FORMAT dstFormat)
     range.NumDescriptors = 1;
     D3D12_ROOT_PARAMETER params[2] = {};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    params[0].Constants.Num32BitValues = 8;
+    params[0].Constants.Num32BitValues = 12;
     params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     params[1].DescriptorTable.NumDescriptorRanges = 1;
     params[1].DescriptorTable.pDescriptorRanges = &range;
     params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    D3D12_STATIC_SAMPLER_DESC sampler = {};
+    sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler.MaxLOD = D3D12_FLOAT32_MAX;
+    sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     D3D12_ROOT_SIGNATURE_DESC rsd = {};
     rsd.NumParameters = 2;
     rsd.pParameters = params;
+    rsd.NumStaticSamplers = 1;
+    rsd.pStaticSamplers = &sampler;
     ID3DBlob* rsBlob = nullptr;
     ID3DBlob* rsErr = nullptr;
     if (FAILED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &rsBlob, &rsErr))) {
@@ -144,6 +169,18 @@ bool Blitter::Init(ID3D12Device* device, DXGI_FORMAT dstFormat)
     pd.RTVFormats[0] = dstFormat;
     pd.SampleDesc.Count = 1;
     hr = device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&m_pso));
+    if (SUCCEEDED(hr)) {
+        // the same, alpha-blended over the target (focus views)
+        D3D12_RENDER_TARGET_BLEND_DESC& b = pd.BlendState.RenderTarget[0];
+        b.BlendEnable = TRUE;
+        b.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+        b.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+        b.BlendOp = D3D12_BLEND_OP_ADD;
+        b.SrcBlendAlpha = D3D12_BLEND_ONE;
+        b.DestBlendAlpha = D3D12_BLEND_ZERO;
+        b.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+        hr = device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&m_psoBlend));
+    }
     vs->Release();
     ps->Release();
     if (FAILED(hr)) {
@@ -167,12 +204,14 @@ bool Blitter::Init(ID3D12Device* device, DXGI_FORMAT dstFormat)
 void Blitter::Shutdown()
 {
     if (m_pso) m_pso->Release(), m_pso = nullptr;
+    if (m_psoBlend) m_psoBlend->Release(), m_psoBlend = nullptr;
     if (m_root) m_root->Release(), m_root = nullptr;
     if (m_srvHeap) m_srvHeap->Release(), m_srvHeap = nullptr;
 }
 
 void Blitter::Record(ID3D12GraphicsCommandList* cl, ID3D12Resource* src, DXGI_FORMAT srcFormat,
-                     D3D12_CPU_DESCRIPTOR_HANDLE rtv, UINT dstW, UINT dstH, const CursorDraw* cursor)
+                     D3D12_CPU_DESCRIPTOR_HANDLE rtv, UINT dstW, UINT dstH, const CursorDraw* cursor,
+                     const BlitRect* over)
 {
     // Ring of 16 descriptors; at most a few blits are in flight at once.
     UINT slot = m_srvNext++ % 16;
@@ -189,8 +228,10 @@ void Blitter::Record(ID3D12GraphicsCommandList* cl, ID3D12Resource* src, DXGI_FO
     m_device->CreateShaderResourceView(src, &sd, cpu);
 
     D3D12_RESOURCE_DESC srcDesc = src->GetDesc();
-    float consts[8] = {(float)srcDesc.Width / (float)dstW, (float)srcDesc.Height / (float)dstH,
-                       m_decodeSrgb ? 1.0f : 0.0f, 0.0f, 0, 0, 1, 0};
+    float rx = over ? over->x : 0, ry = over ? over->y : 0;
+    float rw = over ? over->w : (float)dstW, rh = over ? over->h : (float)dstH;
+    float consts[12] = {1.0f / (float)srcDesc.Width, 1.0f / (float)srcDesc.Height, m_decodeSrgb ? 1.0f : 0.0f,
+                        over ? over->smoothing : 0.0f, 0, 0, 1, 0, rx, ry, rw, rh};
     if (cursor && cursor->visible) {
         consts[4] = cursor->x;
         consts[5] = cursor->y;
@@ -199,12 +240,12 @@ void Blitter::Record(ID3D12GraphicsCommandList* cl, ID3D12Resource* src, DXGI_FO
     }
 
     cl->SetGraphicsRootSignature(m_root);
-    cl->SetPipelineState(m_pso);
+    cl->SetPipelineState(over ? m_psoBlend : m_pso);
     cl->SetDescriptorHeaps(1, &m_srvHeap);
-    cl->SetGraphicsRoot32BitConstants(0, 8, consts, 0);
+    cl->SetGraphicsRoot32BitConstants(0, 12, consts, 0);
     cl->SetGraphicsRootDescriptorTable(1, gpu);
-    D3D12_VIEWPORT vp = {0, 0, (float)dstW, (float)dstH, 0, 1};
-    D3D12_RECT sc = {0, 0, (LONG)dstW, (LONG)dstH};
+    D3D12_VIEWPORT vp = {rx, ry, rw, rh, 0, 1};
+    D3D12_RECT sc = {(LONG)rx, (LONG)ry, (LONG)ceilf(rx + rw), (LONG)ceilf(ry + rh)};
     cl->RSSetViewports(1, &vp);
     cl->RSSetScissorRects(1, &sc);
     cl->OMSetRenderTargets(1, &rtv, FALSE, nullptr);

@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="utf-8" standalone="no" ?>
+<!-- F11: VR settings. One panel: title, the settings rows, a line about the resulting sharpness, buttons. -->
+<GUI onOpen="onOpen" onClose="onClose" onCreate="onCreate">
+    <GuiElement profile="newLayer"/>
+    <Bitmap profile="vr_shade"/>
+
+    <GuiElement profile="vr_panel" id="dialogElement">
+        <ThreePartBitmap profile="vr_panelTop"/>
+        <ThreePartBitmap profile="vr_panelMiddle"/>
+        <ThreePartBitmap profile="vr_panelBottom"/>
+
+        <Text profile="vr_heading" id="guiTitle"/>
+        <ThreePartBitmap profile="vr_headingLine"/>
+
+        <BoxLayout profile="vr_rows">
+            <GuiElement profile="vr_row">
+                <Text profile="vr_rowLabel" id="stereoModeTitle"/>
+                <MultiTextOption profile="vr_rowOption" id="stereoModeSetting" onClick="onClickStereoMode"/>
+            </GuiElement>
+            <GuiElement profile="vr_row">
+                <Text profile="vr_rowLabel" id="renderScaleTitle"/>
+                <MultiTextOption profile="vr_rowOption" id="renderScaleSetting" onClick="onClickRenderScale"/>
+            </GuiElement>
+            <GuiElement profile="vr_row">
+                <Text profile="vr_note" id="densityInfo"/>
+            </GuiElement>
+        </BoxLayout>
+
+        <BoxLayout profile="vr_buttons">
+            <Button profile="buttonBack" id="backButton" text="$l10n_button_back" onClick="onClickBack"/>
+            <Bitmap profile="vr_buttonGap"/>
+            <Button profile="buttonOK" id="okButton" text="$l10n_button_ok" onClick="onClickOk"/>
+        </BoxLayout>
+    </GuiElement>
+
+    <GUIProfiles>
+        <Profile name="vr_shade" extends="dialogFullscreenBg"/>
+        <Profile name="vr_panel" extends="fs25_dialogBg">
+            <size value="1000px 460px"/>
+        </Profile>
+        <Profile name="vr_panelTop" extends="fs25_dialogBgTopSmall"/>
+        <Profile name="vr_panelMiddle" extends="fs25_dialogBgMiddleSmall"/>
+        <Profile name="vr_panelBottom" extends="fs25_dialogBgBottom"/>
+        <Profile name="vr_heading" extends="fs25_dialogTitle">
+            <position value="0px -24px"/>
+        </Profile>
+        <Profile name="vr_headingLine" extends="fs25_lineSeparatorTop">
+            <position value="0px -84px"/>
+            <absoluteSizeOffset value="80px 0px"/>
+        </Profile>
+        <Profile name="vr_rows" extends="emptyPanel" with="anchorTopLeft">
+            <position value="40px -120px"/>
+            <size value="920px 240px"/>
+            <flowDirection value="vertical"/>
+        </Profile>
+        <Profile name="vr_row" extends="emptyPanel" with="anchorTopLeft">
+            <size value="920px 64px"/>
+        </Profile>
+        <Profile name="vr_rowLabel" extends="fs25_textDefault" with="anchorMiddleLeft">
+            <size value="380px 40px"/>
+            <textSize value="19px"/>
+            <textBold value="false"/>
+        </Profile>
+        <Profile name="vr_rowOption" extends="fs25_settingsMultiTextOption" with="anchorMiddleRight"/>
+        <Profile name="vr_note" extends="fs25_textDefault" with="anchorMiddleLeft">
+            <size value="920px 40px"/>
+            <textSize value="16px"/>
+            <textBold value="false"/>
+        </Profile>
+        <Profile name="vr_buttons" extends="fs25_dialogButtonBox"/>
+        <Profile name="vr_buttonGap" extends="fs25_dialogButtonBoxSeparator"/>
+    </GUIProfiles>
+</GUI>
