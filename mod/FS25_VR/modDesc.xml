@@ -17,11 +17,34 @@ F6: projection centred / off-centre
 F7: ambient occlusion: game setting / force SAO
 F8: recentre the view
 F9: VR camera on/off
-F10: HUD on/off in VR (hidden by default)]]></en>
+F10: HUD on/off in VR (hidden by default)
+F11: VR settings (stereo mode, quad views, 3D resolution)]]></en>
     </description>
     <iconFilename>icon_vr.dds</iconFilename>
     <multiplayer supported="true" />
     <extraSourceFiles>
+        <sourceFile filename="scripts/VRSettingsDialog.lua" />
+        <sourceFile filename="scripts/VRHud.lua" />
         <sourceFile filename="scripts/VRMain.lua" />
     </extraSourceFiles>
+    <l10n>
+        <text name="vr_settings_title"><en>VR settings</en><de>VR-Einstellungen</de></text>
+        <text name="vr_settings_stereoMode"><en>Stereo mode</en><de>Stereo-Modus</de></text>
+        <text name="vr_settings_modeAlternating"><en>Alternating eyes</en><de>Abwechselnde Augen</de></text>
+        <text name="vr_settings_modePlane"><en>Both eyes every frame</en><de>Beide Augen pro Frame</de></text>
+        <text name="vr_settings_modeQuad"><en>Both eyes + quad views</en><de>Beide Augen + Quad Views</de></text>
+        <text name="vr_settings_arrangeHud"><en>Arrange HUD</en><de>HUD anordnen</de></text>
+        <text name="vr_hud_help_title"><en>Arrange the HUD</en><de>HUD anordnen</de></text>
+        <text name="vr_hud_help_aim"><en>Crosshair on a panel: it turns yellow</en><de>Fadenkreuz auf ein Panel: es wird gelb</de></text>
+        <text name="vr_hud_help_move"><en>Hold the left mouse button: the panel follows your view</en><de>Linke Maustaste halten: das Panel folgt deinem Blick</de></text>
+        <text name="vr_hud_help_select"><en>Shift+click: select several</en><de>Shift+Klick: mehrere auswählen</de></text>
+        <text name="vr_hud_help_group"><en>G: group the selection / split the group</en><de>G: Auswahl gruppieren / Gruppe lösen</de></text>
+        <text name="vr_hud_help_wheel"><en>Wheel: distance; Shift+wheel: size</en><de>Mausrad: Abstand; Shift+Rad: Größe</de></text>
+        <text name="vr_hud_help_turn"><en>Ctrl+wheel: tilt; Alt+wheel: turn</en><de>Strg+Rad: neigen; Alt+Rad: drehen</de></text>
+        <text name="vr_hud_help_reset"><en>Right click: back to the default place</en><de>Rechtsklick: zurück auf die Startlage</de></text>
+        <text name="vr_hud_help_keys"><en>F10: hide this help; Shift+F10: done (saves)</en><de>F10: Hilfe aus; Shift+F10: fertig (speichert)</de></text>
+        <text name="vr_settings_renderScale"><en>3D resolution</en><de>3D-Auflösung</de></text>
+        <text name="vr_settings_info"><en>Each view renders at %d x %d: %.2fx the headset's resolution</en><de>Jede Ansicht rendert mit %d x %d: %.2fx die Headset-Auflösung</de></text>
+        <text name="vr_settings_infoQuad"><en>Each view renders at %d x %d: middle %.2fx, edge %.2fx the headset's resolution</en><de>Jede Ansicht rendert mit %d x %d: Mitte %.2fx, Rand %.2fx die Headset-Auflösung</de></text>
+    </l10n>
 </modDesc>

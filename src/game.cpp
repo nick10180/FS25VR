@@ -3,6 +3,7 @@
 #include "hooks.h"
 #include "log.h"
 #include "xr.h"
+#include "planes.h"
 
 #include <windows.h>
 #include <cstring>
@@ -56,6 +57,13 @@ void PushBool(lua_State* L, bool b)
     Top(L) = t + 1;
 }
 
+double ArgNumber(lua_State* L, int idx, double def = 0)
+{
+    if (idx > GetTop(L)) return def;
+    const TValue& v = Base(L)[idx - 1];
+    return v.tt == LUA_TNUMBER ? v.value.n : def;
+}
+
 bool ArgBool(lua_State* L, int idx)
 {
     if (idx > GetTop(L)) return false;
@@ -88,10 +96,96 @@ int L_getView(lua_State* L)
     return 14;
 }
 
+// vr.prepareOverlay(on, quad, renderScale) -> width, height, ...: the sizes to create the render overlays for plane
+// stereo with (one pair per overlay: the right eye; with quad views also the left and right focus
+// views; 0, 0 = off); the bridge watches for the render targets of those sizes
+int L_prepareOverlay(lua_State* L)
+{
+    uint32_t w[3] = {}, h[3] = {};
+    float scale = GetTop(L) >= 3 && Base(L)[2].tt == LUA_TNUMBER ? (float)Base(L)[2].value.n : 1.0f;
+    int n = vr::PrepareOverlay(ArgBool(L, 1), ArgBool(L, 2), scale > 0.1f ? scale : 1.0f, w, h);
+    for (int i = 0; i < (n ? n : 1); i++) {
+        PushNumber(L, w[i]);
+        PushNumber(L, h[i]);
+    }
+    return 2 * (n ? n : 1);
+}
+
+// vr.setPlaneStereo(on) -> ok: the render overlay just queued with updateRenderOverlay becomes the
+// output of a second engine view (the right eye through the main render path)
+int L_setPlaneStereo(lua_State* L)
+{
+    PushBool(L, vr::SetPlaneStereo(ArgBool(L, 1)));
+    return 1;
+}
+
+// vr.headsetInfo() -> recommended width, height per eye, focus view share of the field of view (w, h)
+int L_headsetInfo(lua_State* L)
+{
+    uint32_t w = 0, h = 0;
+    float fw = 0, fh = 0;
+    vr::HeadsetInfo(w, h, fw, fh);
+    PushNumber(L, w);
+    PushNumber(L, h);
+    PushNumber(L, fw);
+    PushNumber(L, fh);
+    return 4;
+}
+
 int L_isRunning(lua_State* L)
 {
     PushBool(L, vr::IsRunning());
     return 1;
+}
+
+// vr.hudPanel() -> on, distance, width, offsetY: the game's HUD is shown as panels in 3D (plane
+// stereo) instead of flat in the eyes; the default place of the whole HUD (metres)
+int L_hudPanel(lua_State* L)
+{
+    PushBool(L, g_config.hudPanel);
+    PushNumber(L, g_config.hudDistance);
+    PushNumber(L, g_config.hudWidth);
+    PushNumber(L, g_config.hudOffsetY);
+    return 4;
+}
+
+// vr.setHudPanelCount(n): how many panels setHudPanel describes (-1 = the whole HUD as one)
+int L_setHudPanelCount(lua_State* L)
+{
+    vr::SetHudPanelCount((int)ArgNumber(L, 1, -1));
+    return 0;
+}
+
+// vr.setHudPanel(i, u0, v0, u1, v1, x, y, z, yaw, pitch, width, mark): panel i (0-based) shows that
+// part of the HUD texture (v down) at x, y, z in recentred tracking space (metres), turned by yaw and
+// pitch (radians), width metres wide; mark while arranging: 0 none, 1 outlined, 2 looked at, 3 held,
+// 4 selected; flags: 1 head space, 2 plain area in the mark's colour
+int L_setHudPanel(lua_State* L)
+{
+    float uv[4], pos[3];
+    for (int k = 0; k < 4; k++) uv[k] = (float)ArgNumber(L, 2 + k);
+    for (int k = 0; k < 3; k++) pos[k] = (float)ArgNumber(L, 6 + k);
+    vr::SetHudPanel((int)ArgNumber(L, 1, -1), uv, pos, (float)ArgNumber(L, 9), (float)ArgNumber(L, 10),
+                    (float)ArgNumber(L, 11, 1), (int)ArgNumber(L, 12, 0), (int)ArgNumber(L, 13, 0));
+    return 0;
+}
+
+// vr.setCursorVisible(on): the mouse pointer in the headset image
+int L_setCursorVisible(lua_State* L)
+{
+    vr::SetCursorVisible(ArgBool(L, 1));
+    return 0;
+}
+
+// vr.headPose() -> ok, x, y, z, qx, qy, qz, qw: the head in recentred tracking space (metres)
+int L_headPose(lua_State* L)
+{
+    float p[3] = {}, q[4] = {0, 0, 0, 1};
+    bool ok = vr::HeadPose(p, q);
+    PushBool(L, ok);
+    for (float v : p) PushNumber(L, v);
+    for (float v : q) PushNumber(L, v);
+    return 8;
 }
 
 int L_calibrating(lua_State* L)
@@ -129,10 +223,18 @@ int Hook_setStereoRendering(lua_State* L)
     static const struct { const char* name; lua_CFunction fn; } funcs[] = {
         {"getView", L_getView},
         {"isRunning", L_isRunning},
+        {"hudPanel", L_hudPanel},
+        {"setHudPanelCount", L_setHudPanelCount},
+        {"setHudPanel", L_setHudPanel},
+        {"headPose", L_headPose},
+        {"setCursorVisible", L_setCursorVisible},
         {"recenter", L_recenter},
         {"calibrating", L_calibrating},
         {"setSymmetric", L_setSymmetric},
         {"status", L_status},
+        {"prepareOverlay", L_prepareOverlay},
+        {"setPlaneStereo", L_setPlaneStereo},
+        {"headsetInfo", L_headsetInfo},
     };
     lua_createtable(L, 0, (int)std::size(funcs) + 1);
     for (auto& f : funcs) {
@@ -299,6 +401,11 @@ void LogGameBuild()
 
 } // namespace
 
+uint8_t* GameFindPattern(const char* pattern)
+{
+    return FindSections() ? FindPattern(pattern) : nullptr;
+}
+
 bool InstallGamePatches(bool final)
 {
     static bool done = false, logged = false;
@@ -350,6 +457,8 @@ bool InstallGamePatches(bool final)
     bool ok = WriteJump(stereo.wrapper, (void*)Hook_setStereoRendering) &&
               WriteJump(headTracking.wrapper, (void*)Hook_isHeadTrackingAvailable);
     Log("game: binding patches %s", ok ? "installed" : "FAILED");
+
+    planes::Install();
     done = ok;
     return ok;
 }

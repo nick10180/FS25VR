@@ -9,8 +9,9 @@ fs25vr turns Farming Simulator 25 into a real VR game through OpenXR. It works w
 - **Full 6DOF head tracking.** Lean, duck and look around inside the cab. On foot, you turn with the mouse or stick and your head adds look, lean and crouch.
 - **Smooth headset pacing.** The headset runs at its own refresh rate on a separate thread, so the game never waits for it. Each eye's image is shown with the exact head pose it was rendered from.
 - **Synchronised eyes.** The simulation holds still between the left and right image of a pair, so moving vehicles and turning stay solid.
+- **Both eyes every frame (optional).** The engine renders the second eye in the same frame, with full lighting, shadows and mirrors. With **quad views** it also renders a sharper view of the middle of each eye. Chosen in the settings menu (F11).
 - **Comfortable menus.** Menus, the map and the shop appear on a flat screen in front of you, with a visible mouse pointer.
-- **HUD hidden in VR** (F10 brings it back). Your desktop window stays usable and can be larger than your monitor.
+- **HUD at real depth.** The game's HUD (mods' HUDs included) is split into panels that stay put in the cab, the same in both eyes, and that you can arrange per vehicle. Your desktop window stays usable and can be larger than your monitor.
 
 ## Requirements
 
@@ -47,7 +48,20 @@ With a streaming runtime such as WiVRn the headset only gets the stream's resolu
 
 - **Render size.** After your first VR session, quit the game and double-click **`SET VR RESOLUTION.bat`**. It reads the ideal size for your headset from `<game>\x64\fs25vr.log`, switches the game to a window of that size and turns vsync off. Your old `game.xml` is backed up, and the window is shrunk to fit your monitor automatically.
 - **In the game's graphics settings:** turn off **FSR3 frame generation**, **DLSS/DSR** and **motion blur**. Alternate-eye rendering confuses effects that blend across frames. Ambient occlusion and screen-space reflections work.
-- **Frame rate.** Each eye updates at half the game's frame rate. Aim for at least your headset's refresh rate in game fps. The log reports the frame rate and GPU time every 10 seconds.
+- **Frame rate.** With alternating eyes (the default) each eye updates at half the game's frame rate. Aim for at least your headset's refresh rate in game fps. The log reports the frame rate and GPU time every 10 seconds.
+
+### Settings menu (F11)
+
+| Setting | Options |
+|---|---|
+| Stereo mode | **Alternating eyes** (default): one game frame per eye. **Both eyes every frame**: both eyes in the same frame, each at the full frame rate. **Both eyes + quad views**: as before, plus a sharper focus view in the middle of each eye. |
+| 3D resolution | 50-200 %, the game's own 3D resolution setting. Every view renders at the game window's size times this. |
+
+The line below the settings shows what reaches the headset, as a multiple of its recommended resolution. The settings are saved and applied whenever VR starts.
+
+**Quad views.** Every view renders at the same resolution, and the focus view covers only the middle of the field of view (half of it by default), so the middle gets twice the pixel density of the edges. Make the game window smaller than for alternating eyes (for example `--resolution 2064x2160` on a Quest 3 instead of the full recommended size) and set the sharpness with the 3D resolution. Pixels beyond the headset's resolution are not lost: the bridge averages them down, which smooths edges.
+
+**Anti-aliasing.** With both eyes every frame the game's TAA works and helps against flickering edges. With alternating eyes leave it off (see Known limitations).
 
 ## Keys
 
@@ -55,15 +69,17 @@ With a streaming runtime such as WiVRn the headset only gets the stream's resolu
 |---|---|
 | F8 | Recentre (sit or stand in your neutral position first) |
 | F9 | VR camera on/off (flat screen in the headset) |
-| F10 | HUD on/off in VR (hidden by default) |
+| F10 | HUD on/off in VR (while arranging: the help on/off) |
+| Shift+F10 | Arrange the HUD panels (also in the F11 menu). Look at a panel and hold the left mouse button to move it; wheel: distance, Shift+wheel: size, Ctrl+wheel: tilt, Alt+wheel: turn; right click: back to its default place. Saved per vehicle and on foot |
 | F6 | Projection: centred (default) / exact off-centre |
 | F7 | Ambient occlusion: game setting (default) / force SAO |
+| F11 | VR settings: stereo mode (alternating eyes / both eyes every frame / both eyes + quad views) and 3D resolution. Saved, and applied whenever VR starts |
 | Numpad 4 / 6 | Move your head position left / right (hold) |
 | Numpad 8 / 2 | Move your head position forward / back (hold) |
 | Numpad 9 / 3 | Move your head position up / down (hold) |
 | Numpad 5 | Reset the head position offset |
 
-The head position offset is remembered separately for each vehicle's cab and for walking, in `Documents\My Games\FarmingSimulator2025\modSettings\FS25_VR.xml`. Use it to sit higher or further forward in a cab, or to fix your height on foot.
+The head position offset is remembered separately for each vehicle's cab and for walking, in `Documents\My Games\FarmingSimulator2025\modSettings\FS25_VR.xml` (the F11 settings live there too). Use it to sit higher or further forward in a cab, or to fix your height on foot.
 
 ## Settings (`<game>\x64\fs25vr.ini`)
 
@@ -77,6 +93,10 @@ The head position offset is remembered separately for each vehicle's cab and for
 | `menuDistance`, `menuWidth` | Placement of the flat menu screen (metres) |
 | `fitWindow`, `clipMouse`, `showCursor` | Desktop window fitting, keeping the mouse in the window, pointer in the headset |
 | `presentLag` | Starting guess for frame latency; measured automatically at VR start |
+| `quadFocusWidth`, `quadFocusHeight` | Quad views: share of each eye's field of view the focus view covers (default 0.5 x 0.45, centred) |
+| `quadFocusSmoothing` | Quad views: width of the focus view's soft edge (default 0.18, 0 = hard edge) |
+| `hudPanel` | 1 (default): the HUD is shown as panels in the cab instead of flat in the image (where it is hidden, F10 shows it) |
+| `hudDistance`, `hudWidth`, `hudOffsetY` | Where the HUD panels start: the flat HUD on a plane this far in front of the seat, this wide, this far up (metres; default 1 m away, 1 m wide, centred) |
 | `profile`, `debugLog` | Diagnostics: GPU timing, a per-frame CSV, verbose logging |
 
 ## How it works
@@ -86,13 +106,18 @@ The head position offset is remembered separately for each vehicle's cab and for
 | `dinput8.dll` (bridge) | A proxy DLL loaded by the game. It hooks the game's D3D12 swap chain, runs an OpenXR session on the game's own GPU device, copies each finished frame into the headset's eye images, and gives the Lua mod a small VR API. |
 | `FS25_VR` mod | Every frame it asks the bridge which eye to draw. It then places the game camera at that eye's exact position and orientation, with that eye's field of view. |
 
-Eyes are rendered alternately: one game frame per eye. Each image goes to the headset with the pose it was rendered from, and the OpenXR compositor re-aligns both eyes to your current head pose every refresh.
+Eyes are rendered alternately by default: one game frame per eye. Each image goes to the headset with the pose it was rendered from, and the OpenXR compositor re-aligns both eyes to your current head pose every refresh.
+
+With both eyes every frame, the bridge adds the right eye (and with quad views both focus views) as further views of the engine's own main render path, the way the engine supports several screens. Each view gets the whole pipeline: shadows, lights, mirrors, post-processing with its own history. The bridge lays each focus view over its eye's image with a soft edge and hands the headset one image per eye.
+
+The engine draws the whole HUD into a texture of its own and blends it over the image in its last pass. The bridge copies that texture out and empties it, then draws parts of the copy into the eyes' images as panels, each eye with its own perspective. The Lua mod finds the parts: once a second it records for one frame what the HUD draws where, and who draws it (the HUD's displays, and mods by their environments on the call stack). A mod's block next to a display joins that display's panel.
 
 ## Known limitations
 
-- **Each eye updates at half the game's frame rate.** Head motion is smooth because the runtime re-aligns each eye to your head, but world motion updates at the per-eye rate.
-- **Effects that blend in the previous frame** may show artefacts, because the previous frame belongs to the other eye. Frame generation and DLSS/DSR are the known ones.
-- **The HUD can't be shown on the desktop mirror while it's hidden in the headset.**
+- **With alternating eyes, each eye updates at half the game's frame rate.** Head motion is smooth because the runtime re-aligns each eye to your head, but world motion updates at the per-eye rate. Both eyes every frame (F11) avoids this at a higher GPU cost.
+- **With alternating eyes, effects that blend in the previous frame** may show artefacts, because the previous frame belongs to the other eye. Frame generation, DLSS/DSR and TAA are the known ones.
+- **Both eyes every frame and quad views** are new and have only been tested on Linux (Proton) with WiVRn and a Quest 3.
+- **The desktop window shows no HUD** while it is hidden in the headset or shown there as a panel.
 - **Multiplayer:** works if the server has the mod, but has had little testing.
 - **Game updates** can stop the bridge from finding the engine functions it needs. It then logs this and falls back to a flat screen; it won't crash.
 
