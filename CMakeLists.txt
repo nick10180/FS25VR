@@ -34,13 +34,25 @@ target_compile_definitions(dinput8 PRIVATE
     WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS
     XR_USE_PLATFORM_WIN32 XR_USE_GRAPHICS_API_D3D12
     FS25VR_VERSION="${FS25VR_VERSION}")
-target_compile_options(dinput8 PRIVATE /W3 /EHsc /Zi)
-target_link_options(dinput8 PRIVATE /DEBUG /OPT:REF)
-target_link_libraries(dinput8 PRIVATE
-    ${OPENXR_DIR}/x64/lib/openxr_loader.lib
-    d3d12 dxgi dxguid version)
-# The loader is delay-loaded from our own folder so the proxy never fails to load if it is missing.
-target_link_options(dinput8 PRIVATE /DELAYLOAD:openxr_loader.dll)
-target_link_libraries(dinput8 PRIVATE delayimp)
+if(MSVC)
+    target_compile_options(dinput8 PRIVATE /W3 /EHsc /Zi)
+    target_link_options(dinput8 PRIVATE /DEBUG /OPT:REF)
+    target_link_libraries(dinput8 PRIVATE
+        ${OPENXR_DIR}/x64/lib/openxr_loader.lib
+        d3d12 dxgi dxguid version)
+    # The loader is delay-loaded from our own folder so the proxy never fails to load if it is missing.
+    target_link_options(dinput8 PRIVATE /DELAYLOAD:openxr_loader.dll)
+    target_link_libraries(dinput8 PRIVATE delayimp)
+else()
+    # MinGW cross build (e.g. llvm-mingw on Linux, see cmake/mingw-toolchain.cmake). The import
+    # library is generated from the release's openxr_loader.dll; the C++ runtime is linked
+    # statically so the DLL needs nothing beyond what the game folder already has.
+    target_compile_options(dinput8 PRIVATE -Wall -Wno-unknown-pragmas -Wno-missing-field-initializers)
+    target_link_options(dinput8 PRIVATE -static -Wl,--kill-at)
+    target_link_libraries(dinput8 PRIVATE
+        ${OPENXR_DIR}/mingw/libopenxr_loader.a
+        d3d12 dxgi dxguid version)
+    set_target_properties(dinput8 PROPERTIES PREFIX "")
+endif()
 
 set_target_properties(dinput8 PROPERTIES OUTPUT_NAME "dinput8")

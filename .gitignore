@@ -1,5 +1,6 @@
 # build output
 /build/
+/build-*/
 /release/
 
 # third-party binaries are downloaded, not committed (see README "Building")

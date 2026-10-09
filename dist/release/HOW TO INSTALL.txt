@@ -4,8 +4,12 @@
 Unofficial mod - not made by or affiliated with GIANTS Software.
 Free and open source: https://github.com/nick10180/FS25VR
 
+LINUX (Steam + Proton): see the "Linux (Proton)" section in README.md,
+  or run  bash install.sh  in this folder.
+
 WHAT YOU NEED
-  - Farming Simulator 25 on a Windows PC
+  - Farming Simulator 25 on a Windows PC, or the Steam version under
+    Proton on Linux (see LINUX above)
   - A PC VR headset (Valve Index, Vive, Quest via Link/Air Link or
     Virtual Desktop, Pico, Windows Mixed Reality ...)
   - SteamVR (or your headset's own PC software) set as the

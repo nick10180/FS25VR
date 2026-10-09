@@ -27,6 +27,22 @@ fs25vr turns Farming Simulator 25 into a real VR game through OpenXR. It works w
 
 To uninstall, double-click **`UNINSTALL.bat`**, or delete `dinput8.dll`, `openxr_loader.dll` and `fs25vr.ini` from `<game>\x64` and remove the mod.
 
+### Linux (Proton)
+
+The mod runs under Proton (tested with GE-Proton 10 and Proton Experimental, WiVRn 26.9 with a Quest 3, AMD RX 9070 XT on CachyOS).
+
+1. In the unpacked release, run `bash install.sh`. It finds the game through Steam's library folders (native or Flatpak Steam) and installs into `<game>/x64` and the mods folder inside the game's Proton prefix. `bash install.sh --uninstall` removes it again; `--help` lists the options.
+   - Or by hand: copy everything in `x64/` into `<game>/x64/`, and `mod/FS25_VR.zip` into `steamapps/compatdata/2300320/pfx/drive_c/users/steamuser/Documents/My Games/FarmingSimulator2025/mods/`.
+2. Set the game's Steam launch options so Wine loads the bridge instead of its own `dinput8` and the Steam runtime container sees your OpenXR runtime:
+   ```
+   WINEDLLOVERRIDES="dinput8=n,b" PRESSURE_VESSEL_IMPORT_OPENXR_1_RUNTIMES=1 %command%
+   ```
+   Leave out `WINEDLLOVERRIDES` to play flat without the bridge loading at all.
+3. Start the OpenXR runtime (e.g. the WiVRn server) and connect the headset before starting the game.
+4. For the render size, run `bash install.sh --auto-resolution` after your first VR session (the counterpart of `SET VR RESOLUTION.bat`), or `--resolution 2568x2584` for a size of your choice. It edits `game.xml` in the prefix and keeps a backup.
+
+With a streaming runtime such as WiVRn the headset only gets the stream's resolution: raise it in the WiVRn app on the headset before raising the render size.
+
 ### Recommended setup
 
 - **Render size.** After your first VR session, quit the game and double-click **`SET VR RESOLUTION.bat`**. It reads the ideal size for your headset from `<game>\x64\fs25vr.log`, switches the game to a window of that size and turns vsync off. Your old `game.xml` is backed up, and the window is shrunk to fit your monitor automatically.
@@ -145,6 +161,12 @@ Requirements: Visual Studio 2022 or later (C++ desktop workload), CMake 3.20+, N
 1. Download the OpenXR SDK loader package (`openxr_loader_windows-<ver>.zip` from https://github.com/KhronosGroup/OpenXR-SDK-Source/releases) and unpack it into `third_party/openxr/`.
 2. Run `build.bat` (edit the `vcvars64.bat` path inside it for your Visual Studio). The output is `build/dinput8.dll`.
 3. `install.ps1` installs from the build. `package.ps1` creates `release/fs25vr-<version>.zip` with SHA-256 checksums.
+
+### Cross build on Linux (llvm-mingw)
+
+1. Install llvm-mingw and CMake. Copy the OpenXR headers to `third_party/openxr/include/openxr/`.
+2. Copy a release's `openxr_loader.dll` to `third_party/openxr/x64/bin/` (`install.sh` installs it from there) and create an import library from it: list its exports in `third_party/openxr/mingw/openxr_loader.def` (`LIBRARY openxr_loader.dll`, `EXPORTS`, one name per line, e.g. from `llvm-readobj --coff-exports`) and run `llvm-dlltool -m i386:x86-64 -d openxr_loader.def -l libopenxr_loader.a` in that folder.
+3. `cmake -S . -B build-mingw -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-toolchain.cmake -DCMAKE_BUILD_TYPE=Release && cmake --build build-mingw`. The output is `build-mingw/dinput8.dll`.
 
 ## License
 
