@@ -1,6 +1,7 @@
 #include "config.h"
 #include "log.h"
 #include <windows.h>
+#include <algorithm>
 #include <string>
 
 Config g_config;
@@ -35,6 +36,18 @@ void LoadConfig()
     g_config.clipMouse    = ReadInt(f, L"clipMouse", 1) != 0;
     g_config.showCursor   = ReadInt(f, L"showCursor", 1) != 0;
     g_config.asyncSubmit  = ReadInt(f, L"asyncSubmit", 1) != 0;
+    g_config.hudArea      = std::clamp(ReadFloat(f, L"hudArea", 0.45f), 0.0f, 1.0f);
+    g_config.hudDepth     = ReadFloat(f, L"hudDepth", 0.0f);
+    if (g_config.hudDepth != 0.0f) g_config.hudDepth = std::clamp(g_config.hudDepth, 0.3f, 100.0f);
+    g_config.hudLower     = std::clamp(ReadFloat(f, L"hudLower", 0.08f), -0.3f, 0.3f);
+    g_config.hudEye       = std::clamp(ReadInt(f, L"hudEye", 0), 0, 2);
+    g_config.depthLayer   = ReadInt(f, L"depthLayer", 1) != 0;
+    g_config.vrMode       = std::clamp(ReadInt(f, L"vrMode", 0), 0, 2);
+    g_config.renderWidth  = std::max(0, ReadInt(f, L"renderWidth", 0));
+    g_config.renderHeight = std::max(0, ReadInt(f, L"renderHeight", 0));
+    g_config.foveated     = ReadInt(f, L"foveated", 1) != 0;
+    g_config.foveaInner   = std::clamp(ReadFloat(f, L"foveaInner", 0.40f), 0.1f, 2.0f);
+    g_config.foveaOuter   = std::clamp(ReadFloat(f, L"foveaOuter", 0.65f), g_config.foveaInner, 3.0f);
     g_config.profile      = ReadInt(f, L"profile", 0) != 0;
     g_config.forceRender  = ReadInt(f, L"forceRender", 0) != 0;
     g_config.deferPatches = ReadInt(f, L"deferPatches", 0) != 0;
@@ -46,3 +59,4 @@ void LoadConfig()
         g_config.menuDistance, g_config.menuWidth, g_config.fitWindow, g_config.syncEyes, g_config.syncPhase,
         g_config.eyeOrder, g_config.symmetricFrustum, g_config.asyncSubmit, g_config.debugLog);
 }
+

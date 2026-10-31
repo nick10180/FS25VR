@@ -17,7 +17,12 @@ F6: projection centred / off-centre
 F7: ambient occlusion: game setting / force SAO
 F8: recentre the view
 F9: VR camera on/off
-F10: HUD on/off in VR (hidden by default)]]></en>
+F10: HUD on/off in VR (hidden by default)
+Shift+F10: HUD size in VR
+Ctrl+F10: HUD height in VR
+Alt+F10: HUD depth in VR
+F5: foveated rendering on/off
+F3: eye sync phase 0 / 1]]></en>
     </description>
     <iconFilename>icon_vr.dds</iconFilename>
     <multiplayer supported="true" />

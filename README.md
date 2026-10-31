@@ -20,10 +20,13 @@ fs25vr turns Farming Simulator 25 into a real VR game through OpenXR. It works w
 ## Install
 
 1. Download the latest release zip from https://github.com/nick10180/FS25VR/releases and unpack it anywhere.
-2. Double-click **`INSTALL.bat`**. It finds the game through Steam, the Windows installed-programs list or Epic, and asks for the folder if it can't.
+2. Double-click **`INSTALL.bat`**. It finds the game through Steam, the Windows installed-programs list, Epic or the Xbox app, and asks for the folder if it can't.
    - If Windows says *"Windows protected your PC"*, click **More info**, then **Run anyway**.
    - Or install manually: copy everything in `x64\` into `<game>\x64\` and `mod\FS25_VR.zip` into your mods folder. If you copy by hand, **unblock the DLLs** (see the [FAQ](#faq)).
+   - **Xbox app / Microsoft Store version:** the game folder is the `Content` folder of the install (for example `C:\XboxGames\Farming Simulator 25 (PC)\Content`), and the mods folder is `%LOCALAPPDATA%\Packages\GIANTSSoftware.FarmingSimulator25PC_<id>\LocalCache\Local\mods` (the same folder as your other mods), not `Documents\My Games`. The game's `log.txt` (in that same profile folder) shows the folder it uses on its `Mod Directory:` line.
 3. Start the game with your headset connected. Enable **VR (OpenXR, stereoscopic 6DOF)** in the mod list when you load a savegame.
+
+VR or flat is automatic: with your headset ready (SteamVR running, or Quest Link / Virtual Desktop connected) the game starts in VR; without it, it starts normally on your monitor, TV or projector with your own display settings, and the mod stays idle. Set `vrMode` in `fs25vr.ini` to force one or the other.
 
 To uninstall, double-click **`UNINSTALL.bat`**, or delete `dinput8.dll`, `openxr_loader.dll` and `fs25vr.ini` from `<game>\x64` and remove the mod.
 
@@ -39,14 +42,15 @@ The mod runs under Proton (tested with GE-Proton 10 and Proton Experimental, WiV
    ```
    Leave out `WINEDLLOVERRIDES` to play flat without the bridge loading at all.
 3. Start the OpenXR runtime (e.g. the WiVRn server) and connect the headset before starting the game.
-4. For the render size, run `bash install.sh --auto-resolution` after your first VR session (the counterpart of `SET VR RESOLUTION.bat`), or `--resolution 2568x2584` for a size of your choice. It edits `game.xml` in the prefix and keeps a backup.
+4. The render size is set automatically from the second VR start on (see *Render size* below). `bash install.sh --resolution 2568x2584` sets a fixed size of your choice instead; it edits `game.xml` in the prefix and keeps a backup.
 
 With a streaming runtime such as WiVRn the headset only gets the stream's resolution: raise it in the WiVRn app on the headset before raising the render size.
 
 ### Recommended setup
 
-- **Render size.** After your first VR session, quit the game and double-click **`SET VR RESOLUTION.bat`**. It reads the ideal size for your headset from `<game>\x64\fs25vr.log`, switches the game to a window of that size and turns vsync off. Your old `game.xml` is backed up, and the window is shrunk to fit your monitor automatically.
+- **Render size: automatic.** In your first VR session the bridge measures the render size your headset needs (from the runtime's resolution setting, e.g. SteamVR's resolution slider) and the mod asks you to restart the game once. From then on every VR start uses that size (a window, vsync off, Direct3D 12), and the window is shrunk to fit your monitor. Your own display settings are kept aside and come back for flat play. To trade sharpness for frame rate, lower the resolution in SteamVR (or your runtime) or set `renderWidth`/`renderHeight`.
 - **In the game's graphics settings:** turn off **FSR3 frame generation**, **DLSS/DSR** and **motion blur**. Alternate-eye rendering confuses effects that blend across frames. Ambient occlusion and screen-space reflections work.
+- **Anti-aliasing:** temporal post-process AA (TAA, DLAA, FSR3, XeSS) blends in the previous frame, which is the other eye's image: near objects get a faint outline where the other eye sees them, and depth looks flat. The mod switches it off while VR runs and restores it afterwards. A higher render size is the best way to smooth edges in VR.
 - **Frame rate.** Each eye updates at half the game's frame rate. Aim for at least your headset's refresh rate in game fps. The log reports the frame rate and GPU time every 10 seconds.
 
 ## Keys
@@ -56,8 +60,13 @@ With a streaming runtime such as WiVRn the headset only gets the stream's resolu
 | F8 | Recentre (sit or stand in your neutral position first) |
 | F9 | VR camera on/off (flat screen in the headset) |
 | F10 | HUD on/off in VR (hidden by default) |
+| Shift+F10 | HUD size in VR: 4 presets (area and scale), saved in `modSettings\FS25_VR.xml` |
+| Ctrl+F10 | HUD height in VR: moves the whole HUD down in steps (saved) |
+| Alt+F10 | HUD depth in VR: 0.75 / 1 / 1.5 / 2.5 / 5 / 10 / 20 m / infinity (saved). If you see the HUD twice, pick the depth where it merges into one |
 | F6 | Projection: centred (default) / exact off-centre |
 | F7 | Ambient occlusion: game setting (default) / force SAO |
+| F5 | Foveated rendering on/off |
+| F3 | Eye sync phase 0 / 1: drive and keep the one where moving things look solid, then set `syncPhase` in `fs25vr.ini` |
 | Numpad 4 / 6 | Move your head position left / right (hold) |
 | Numpad 8 / 2 | Move your head position forward / back (hold) |
 | Numpad 9 / 3 | Move your head position up / down (hold) |
@@ -65,12 +74,24 @@ With a streaming runtime such as WiVRn the headset only gets the stream's resolu
 
 The head position offset is remembered separately for each vehicle's cab and for walking, in `Documents\My Games\FarmingSimulator2025\modSettings\FS25_VR.xml`. Use it to sit higher or further forward in a cab, or to fix your height on foot.
 
+## In-game VR settings
+
+In a savegame, **Esc → Settings** has a *Virtual reality (FS25_VR)* section at the end of the general settings: world scale, HUD on/off, HUD size, height and depth, foveated rendering, eye sync phase and ambient occlusion. They take effect immediately, are saved in `Documents\My Games\FarmingSimulator2025\modSettings\FS25_VR.xml` (the Xbox app version keeps `modSettings` in its own profile folder) and override the matching values in `fs25vr.ini`. The keys below change the same settings.
+
 ## Settings (`<game>\x64\fs25vr.ini`)
 
 | Setting | Meaning |
 |---|---|
 | `symmetricFrustum` | 1 (default): each eye renders a centred frustum enclosing its field of view. The game's ambient occlusion assumes a centred projection, so with the exact off-centre frustum it differs between the eyes. On headsets with offset lenses this costs horizontal pixel density; use the recommended render size to compensate. |
 | `asyncSubmit` | 1 (default): the headset frame loop runs on its own thread |
+| `depthLayer` | 1 (default): sends the game's depth buffer with each eye image (XR_KHR_composition_layer_depth). Runtimes that fill in missed frames use it to move near objects correctly (Meta's Quest Link runtime makes the most use of it). Needs variable rate shading support (the same hooks as foveated rendering) and asyncSubmit=1. The log says whether it is active; set 0 if it ever causes rendering problems. |
+| `vrMode` | 0 (default) = VR when a headset is ready at start (SteamVR running, or the Meta / Virtual Desktop runtime reporting a headset), otherwise the game starts normally and the mod stays idle; 1 = always VR; 2 = never (flat). |
+| `renderWidth`, `renderHeight` | 0 (default) = the render size measured for your headset in an earlier VR session (kept in `fs25vr_size.ini`). Any other value is a fixed size. Either way the bridge writes it into the game's `game.xml` at every VR start (windowed, vsync off, Direct3D 12), so a game update or the settings menu cannot reset it; your own display settings are kept aside and come back for flat play. |
+| `hudArea` | 0.45 (default; Shift+F10 cycles size presets in game, which override it): while VR runs the HUD is moved into the central part of the view both eyes see, this share of the field of view (larger = HUD further out, 0 = leave the HUD where the game puts it). The HUD is still hidden by default; F10 shows it. |
+| `hudLower` | 0.08 (default): moves the HUD area down by this share of the image height; comfortable viewing sits a little below straight ahead. Ctrl+F10 changes it in game (saved, overrides this). |
+| `hudEye` | 0 (default) = HUD in both eyes, 1 = left eye only, 2 = right eye only. One-eye HUDs cannot be fused by the eyes, so some people find them uncomfortable. |
+| `hudDepth` | 0 (default) = infinity, as the game draws it: while driving your eyes look far ahead, so this fuses best. A distance in metres (Alt+F10 in game: 0.75 to 20 m) shifts each eye's HUD so it appears at that depth instead, which can suit on-foot play; if you see the HUD twice, go back to infinity. |
+| `foveated`, `foveaInner`, `foveaOuter` | Fixed foveated rendering with variable rate shading (1 = on, default; F5 toggles). The centre of each eye's view is shaded at full rate up to `foveaInner` (0.40), a 2x2 ring up to `foveaOuter` (0.65), and 4x4 beyond, including the parts of the centred frustum the lens never shows. Radii are fractions of the field of view to each side. Only the full-size 3D passes are affected; menus, post-processing and the HUD keep full rate. Needs VRS tier 2 (RTX 20+, RX 6000+, Arc); the log says whether it is active. Compare the GPU time with `profile=1` to see what it gains on your PC. |
 | `syncEyes`, `syncPhase` | Freeze the simulation on right-eye frames. If moving objects still look doubled, try `syncPhase=1`. |
 | `eyeOrder` | Which eye is drawn on even frames (0 = left, default). If one eye shimmers or stutters and the other doesn't, try `eyeOrder=1`. |
 | `worldScale` | >1 makes the world feel smaller |

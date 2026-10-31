@@ -24,15 +24,20 @@ INSTALL (2 minutes)
      - If it can't find the game, it asks you for the game folder.
        Paste it in (e.g.  D:\SteamLibrary\steamapps\common\Farming Simulator 25)
        and press Enter.
-  3. Put your headset on (or have it ready) and start the game.
+     - Xbox app / Microsoft Store version: the game folder is the
+       "Content" folder of the install (e.g.
+       C:\XboxGames\Farming Simulator 25 (PC)\Content). Its mods
+       folder is %LOCALAPPDATA%\Packages\
+       GIANTSSoftware.FarmingSimulator25PC_<id>\LocalCache\Local\mods
+  3. Start SteamVR (or Quest Link / Virtual Desktop) with your
+     headset connected, then start the game.
   4. Load your savegame. In the mod list, make sure
      "VR (OpenXR, stereoscopic 6DOF)" is ticked.
   5. You should see "VR active". Press F8 to recentre your view.
-
-FOR THE SHARPEST PICTURE (do this once, after step 5)
-  6. Quit the game.
-  7. Double-click  SET VR RESOLUTION.bat
-  8. Start the game again.
+  6. The first time only: the mod measures the picture size your
+     headset needs and asks you to restart the game once. After
+     that every VR start is sharp, with nothing to set up.
+     (Less sharp but faster: lower the resolution in SteamVR.)
 
 IN THE GAME'S GRAPHICS OPTIONS, PLEASE TURN OFF
   - Frame generation (FSR 3 frame generation)
@@ -44,12 +49,21 @@ KEYS
   F8   Recentre the view (sit or stand normally first)
   F9   VR camera on / off
   F10  Show / hide the HUD in VR (hidden by default)
+       Shift / Ctrl / Alt + F10: HUD size / height / depth
+  F5   Foveated rendering on / off
   F6   Projection mode (leave on "centred" unless told otherwise)
   F7   Ambient occlusion mode
+  All of these are also in the game: Esc > Settings, section
+  "Virtual reality (FS25_VR)".
 
 MENUS, MAP AND SHOP
   These appear on a big flat screen in front of you. Use the mouse
   as normal - a pointer is shown in the headset.
+
+PLAY WITHOUT VR (monitor, TV, projector)
+  Nothing to do: if no headset is ready when the game starts (SteamVR
+  not running, Quest not connected), the game starts normally with
+  your own display settings.
 
 UNINSTALL
   Double-click  UNINSTALL.bat  (or delete dinput8.dll,
@@ -63,6 +77,8 @@ SOMETHING WRONG?
     this for you.)
   - Everything is a flat screen: the VR mod isn't ticked for that
     savegame, or you're in a menu.
+  - The game started flat although you wanted VR: start SteamVR
+    (and connect the headset) before the game, then restart it.
   - Stutters: lower the game's graphics settings. VR needs a high
     frame rate (ideally above your headset's refresh rate).
   - Send the file  <game folder>\x64\fs25vr.log  with your bug

@@ -3,7 +3,7 @@
 
     x64\dinput8.dll, x64\openxr_loader.dll, x64\fs25vr.ini   (copy into <game>\x64)
     mod\FS25_VR.zip                                         (copy into your mods folder)
-    HOW TO INSTALL.txt, INSTALL.bat, UNINSTALL.bat, SET VR RESOLUTION.bat, install.ps1, install.sh,
+    HOW TO INSTALL.txt, INSTALL.bat, UNINSTALL.bat, install.ps1, install.sh,
     README.md, LICENSE, THIRD_PARTY_NOTICES.md, LICENSE-openxr-loader.txt
     SHA256SUMS.txt
 
@@ -25,7 +25,7 @@ Copy-Item (Join-Path $root "build\dinput8.dll") (Join-Path $stage "x64")
 Copy-Item (Join-Path $root "third_party\openxr\x64\bin\openxr_loader.dll") (Join-Path $stage "x64")
 Copy-Item (Join-Path $root "dist\fs25vr.ini") (Join-Path $stage "x64")
 foreach ($f in "install.ps1", "install.sh", "README.md", "LICENSE", "THIRD_PARTY_NOTICES.md") { Copy-Item (Join-Path $root $f) $stage }
-Copy-Item (Join-Path $root "dist\release\*") $stage   # INSTALL.bat, UNINSTALL.bat, SET VR RESOLUTION.bat, HOW TO INSTALL.txt
+Copy-Item (Join-Path $root "dist\release\*") $stage   # INSTALL.bat, UNINSTALL.bat, HOW TO INSTALL.txt
 Copy-Item (Join-Path $root "third_party\openxr\share\doc\openxr\LICENSE") (Join-Path $stage "LICENSE-openxr-loader.txt")
 
 Add-Type -AssemblyName System.IO.Compression
