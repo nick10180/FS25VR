@@ -2,6 +2,8 @@
 #include "config.h"
 #include "hooks.h"
 #include "log.h"
+#include "mode.h"
+#include "vrs.h"
 #include "xr.h"
 
 #include <windows.h>
@@ -106,6 +108,107 @@ int L_setSymmetric(lua_State* L)
     return 0;
 }
 
+double ArgNumber(lua_State* L, int idx, double def)
+{
+    if (idx > GetTop(L)) return def;
+    const TValue& v = Base(L)[idx - 1];
+    return v.tt == LUA_TNUMBER ? v.value.n : def;
+}
+
+int L_setSyncPhase(lua_State* L)
+{
+    vr::SetSyncPhase((int)ArgNumber(L, 1, 0));
+    return 0;
+}
+
+int L_getSyncPhase(lua_State* L)
+{
+    PushNumber(L, vr::GetSyncPhase());
+    return 1;
+}
+
+// vr.getHudRect() -> ok, left, right, bottom, top (screen units, y up)
+int L_getHudRect(lua_State* L)
+{
+    float r[4];
+    if (!vr::GetHudRect(r)) {
+        PushBool(L, false);
+        return 1;
+    }
+    PushBool(L, true);
+    for (float v : r) PushNumber(L, v);
+    return 5;
+}
+
+int L_setHudArea(lua_State* L)
+{
+    vr::SetHudArea((float)ArgNumber(L, 1, 0.45));
+    return 0;
+}
+
+int L_setWorldScale(lua_State* L)
+{
+    vr::SetWorldScale((float)ArgNumber(L, 1, 1.0));
+    return 0;
+}
+
+int L_getWorldScale(lua_State* L)
+{
+    PushNumber(L, vr::GetWorldScale());
+    return 1;
+}
+
+int L_setHudDepth(lua_State* L)
+{
+    vr::SetHudDepth((float)ArgNumber(L, 1, 1.5));
+    return 0;
+}
+
+int L_setHudLower(lua_State* L)
+{
+    vr::SetHudLower((float)ArgNumber(L, 1, 0.08));
+    return 0;
+}
+
+int L_getHudEye(lua_State* L)
+{
+    PushNumber(L, vr::GetHudEye());
+    return 1;
+}
+
+int L_setDepthRange(lua_State* L)
+{
+    vr::SetDepthRange((float)ArgNumber(L, 1, 0), (float)ArgNumber(L, 2, 0));
+    return 0;
+}
+
+// vr.getHudShift() -> ok, shiftLeftEye, shiftRightEye (screen units)
+int L_getHudShift(lua_State* L)
+{
+    float s[2];
+    if (!vr::GetHudShift(s)) {
+        PushBool(L, false);
+        return 1;
+    }
+    PushBool(L, true);
+    PushNumber(L, s[0]);
+    PushNumber(L, s[1]);
+    return 3;
+}
+
+// vr.setFoveated(on) -> false if the GPU does not support it
+int L_setFoveated(lua_State* L)
+{
+    PushBool(L, vrs::SetEnabled(ArgBool(L, 1)));
+    return 1;
+}
+
+int L_getFoveated(lua_State* L)
+{
+    PushBool(L, vrs::IsEnabled());
+    return 1;
+}
+
 int L_recenter(lua_State* L)
 {
     vr::RequestRecenter();
@@ -116,6 +219,17 @@ int L_status(lua_State* L)
 {
     if (lua_pushstring) {
         lua_pushstring(L, vr::Status());
+        return 1;
+    }
+    return 0;
+}
+
+// A message for the player about the render size (restart once for full sharpness), or nil.
+int L_renderSizeNote(lua_State* L)
+{
+    const char* note = mode::RenderSizeNote();
+    if (note && lua_pushstring) {
+        lua_pushstring(L, note);
         return 1;
     }
     return 0;
@@ -132,7 +246,21 @@ int Hook_setStereoRendering(lua_State* L)
         {"recenter", L_recenter},
         {"calibrating", L_calibrating},
         {"setSymmetric", L_setSymmetric},
+        {"setFoveated", L_setFoveated},
+        {"getFoveated", L_getFoveated},
+        {"getHudRect", L_getHudRect},
+        {"getHudShift", L_getHudShift},
+        {"setDepthRange", L_setDepthRange},
+        {"setHudArea", L_setHudArea},
+        {"setHudLower", L_setHudLower},
+        {"setHudDepth", L_setHudDepth},
+        {"setWorldScale", L_setWorldScale},
+        {"getWorldScale", L_getWorldScale},
+        {"getHudEye", L_getHudEye},
+        {"setSyncPhase", L_setSyncPhase},
+        {"getSyncPhase", L_getSyncPhase},
         {"status", L_status},
+        {"renderSizeNote", L_renderSizeNote},
     };
     lua_createtable(L, 0, (int)std::size(funcs) + 1);
     for (auto& f : funcs) {

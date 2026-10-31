@@ -105,6 +105,8 @@ bool InstallEyeSync(bool final)
         {"\x48\x8B\xC4\x48\x89\x58\x18\x48\x89\x70\x20\x55\x57\x41\x56", 15},
         // mov [rsp+18h],rbx; push rbp; push rsi; push rdi; push r14; push r15  (v1.20)
         {"\x48\x89\x5C\x24\x18\x55\x56\x57\x41\x56\x41\x57", 12},
+        // mov [rsp+18h],rbx; push rbp; push rsi; push rdi; lea rbp,[rsp-160h]  (v1.24 Microsoft Store)
+        {"\x48\x89\x5C\x24\x18\x55\x56\x57\x48\x8D\xAC\x24\xA0\xFE\xFF\xFF", 16},
     };
     size_t kPrologue = 0;
     for (const auto& p : kKnown)

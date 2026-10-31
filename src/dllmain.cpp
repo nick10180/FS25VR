@@ -3,8 +3,10 @@
 #include "game.h"
 #include "hooks.h"
 #include "log.h"
+#include "mode.h"
 #include "window.h"
 #include "sync.h"
+#include "vrs.h"
 
 static void Startup(HMODULE self)
 {
@@ -17,10 +19,12 @@ static void Startup(HMODULE self)
     LoadConfig();
     if (!g_config.enabled) {
         Log("disabled in fs25vr.ini; acting as a plain dinput8 proxy");
-        return;
+        return;  // flat play: game.xml and the window are left to the game
     }
+    mode::Install();  // VR or flat: decided when the game opens game.xml, before it reads it
     InstallGamePatches(false);  // retried once the game runs (see hooks.cpp LateGameInit)
     if (!InstallDxgiHooks()) Log("dxgi hooks failed: no VR output");
+    vrs::HookDeviceEarly();
     InstallWindowHooks();
     InstallEyeSync(false);
 }

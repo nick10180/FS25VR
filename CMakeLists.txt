@@ -26,6 +26,8 @@ add_library(dinput8 SHARED
     src/window.cpp
     src/sync.cpp
     src/profile.cpp
+    src/vrs.cpp
+    src/mode.cpp
     src/dinput8.def
 )
 

@@ -11,7 +11,9 @@
 #include "blit.h"
 #include "config.h"
 #include "log.h"
+#include "mode.h"
 #include "profile.h"
+#include "vrs.h"
 #include "window.h"
 
 #include <openxr/openxr.h>
@@ -49,6 +51,12 @@ struct Chain {
     D3D12_CPU_DESCRIPTOR_HANDLE              stagingRtv[2]{};
     int                                      writeSet = 0;        // staging texture the game draws into
     bool                                     staged = false;      // menu screen: new image not yet copied
+
+    // depth layer (eye chains): staging textures the captured scene depth is copied into (rest in
+    // COPY_DEST), copied by the compositor into the depth swapchain
+    XrSwapchain                              depthHandle = XR_NULL_HANDLE;
+    std::vector<ID3D12Resource*>             depthImages;
+    ID3D12Resource*                          depthStaging[2] = {};
 };
 
 struct State {
@@ -143,6 +151,17 @@ struct State {
 
     XrPosef        recenter{{0, 0, 0, 1}, {0, 0, 0}};
     bool           recenterPending = true;
+    XrTime         recenterAfter = 0;    // a runtime recentre takes effect at this display time
+    float          hudActual[2][4] = {};  // per eye: field of view tangents {left, right, down, up}
+    float          hudRendered[2][4] = {}; // per eye: tangents of the frustum actually rendered
+    bool           hudValid[2] = {false, false};
+    float          ipd = 0.063f;          // metres between the eyes, from the view poses
+    bool           depthExt = false;      // XR_KHR_composition_layer_depth enabled
+    bool           depthOn = false;       // depth swapchains exist and the game's depth is captured
+    float          nearClip = 0.1f, farClip = 1000.0f;  // game camera clip distances (world units)
+    bool           pairDepth[2] = {}, readyDepth[2] = {}, eyeDepth[2] = {};
+    XrPosef        menuPose{{0, 0, 0, 1}, {0, 0, 0}};
+    bool           menuPlaced = false;   // the flat menu screen has been placed since it opened
 
     UINT           bbW = 0, bbH = 0;
     UINT           recW = 0, recH = 0;   // runtime's recommended per-eye resolution
@@ -248,6 +267,21 @@ XrPosef YawOnly(const XrPosef& p)
     return r;
 }
 
+// The flat menu screen opens straight ahead of where the player faces at that moment and stays
+// put while it is open (S.mtx held).
+void PlaceMenu(XrSpace view, XrSpace local, XrTime t)
+{
+    if (S.menuPlaced) return;
+    XrPosef head = S.recenter;
+    XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
+    if (XR_SUCCEEDED(xrLocateSpace(view, local, t, &loc)) && (loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) &&
+        (loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT))
+        head = YawOnly(loc.pose);
+    XrPosef offset{{0, 0, 0, 1}, {0, 0, -g_config.menuDistance}};
+    S.menuPose = PoseCompose(head, offset);
+    S.menuPlaced = true;
+}
+
 // ---------------------------------------------------------------------------------------------
 
 #define XR_CHECK(call)                                                                    \
@@ -265,9 +299,55 @@ XrPosef YawOnly(const XrPosef& p)
 void DestroyChain(Chain& c)
 {
     if (c.handle) xrDestroySwapchain(c.handle);
+    if (c.depthHandle) xrDestroySwapchain(c.depthHandle);
     for (auto* t : c.staging)
         if (t) t->Release();
+    for (auto* t : c.depthStaging)
+        if (t) t->Release();
     c = Chain{};
+}
+
+// Depth swapchain and staging textures for an eye chain. A failure only turns the depth layer off.
+bool CreateDepthChain(Chain& c, uint32_t w, uint32_t h, int stagingCount)
+{
+    D3D12_HEAP_PROPERTIES hp = {D3D12_HEAP_TYPE_DEFAULT};
+    D3D12_RESOURCE_DESC td = {};
+    td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    td.Width = w;
+    td.Height = h;
+    td.DepthOrArraySize = 1;
+    td.MipLevels = 1;
+    td.Format = DXGI_FORMAT_D32_FLOAT;
+    td.SampleDesc.Count = 1;
+    td.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+    for (int i = 0; i < stagingCount; i++)
+        if (FAILED(S.device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td, D3D12_RESOURCE_STATE_COPY_DEST,
+                                                     nullptr, IID_PPV_ARGS(&c.depthStaging[i])))) {
+            c.depthStaging[i] = nullptr;
+            Log("depth layer: could not create depth staging textures");
+            return false;
+        }
+    XrSwapchainCreateInfo ci{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+    ci.usageFlags = XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
+    ci.format = DXGI_FORMAT_D32_FLOAT;
+    ci.sampleCount = 1;
+    ci.width = w;
+    ci.height = h;
+    ci.faceCount = 1;
+    ci.arraySize = 1;
+    ci.mipCount = 1;
+    XrResult r = xrCreateSwapchain(S.session, &ci, &c.depthHandle);
+    if (XR_FAILED(r)) {
+        c.depthHandle = XR_NULL_HANDLE;
+        Log("depth layer: xrCreateSwapchain for depth failed (%d)", r);
+        return false;
+    }
+    uint32_t n = 0;
+    xrEnumerateSwapchainImages(c.depthHandle, 0, &n, nullptr);
+    std::vector<XrSwapchainImageD3D12KHR> imgs(n, {XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR});
+    xrEnumerateSwapchainImages(c.depthHandle, n, &n, (XrSwapchainImageBaseHeader*)imgs.data());
+    for (uint32_t i = 0; i < n; i++) c.depthImages.push_back(imgs[i].texture);
+    return n > 0;
 }
 
 void WaitGpuIdle()
@@ -293,6 +373,9 @@ void DestroySwapchains()
     S.eyeValid[0] = S.eyeValid[1] = false;
     S.pairReady = false;
     S.pairMask = 0;
+    if (S.depthOn) vrs::EnableDepthCapture(false);
+    S.depthOn = false;
+    for (int e = 0; e < 2; e++) S.pairDepth[e] = S.readyDepth[e] = S.eyeDepth[e] = false;
 }
 
 void DestroySession()
@@ -400,14 +483,25 @@ void ProcessSamples()
 
 bool InitInstance()
 {
-    const char* exts[] = {XR_KHR_D3D12_ENABLE_EXTENSION_NAME};
+    std::vector<const char*> exts = {XR_KHR_D3D12_ENABLE_EXTENSION_NAME};
+    S.depthExt = false;
+    if (g_config.depthLayer && g_config.asyncSubmit) {
+        uint32_t n = 0;
+        xrEnumerateInstanceExtensionProperties(nullptr, 0, &n, nullptr);
+        std::vector<XrExtensionProperties> props(n, {XR_TYPE_EXTENSION_PROPERTIES});
+        xrEnumerateInstanceExtensionProperties(nullptr, n, &n, props.data());
+        for (auto& p : props)
+            if (strcmp(p.extensionName, XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME) == 0) S.depthExt = true;
+        if (S.depthExt) exts.push_back(XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME);
+        else Log("depth layer: the runtime does not support XR_KHR_composition_layer_depth");
+    }
     XrInstanceCreateInfo ci{XR_TYPE_INSTANCE_CREATE_INFO};
     strcpy(ci.applicationInfo.applicationName, "Farming Simulator 25 VR");
     ci.applicationInfo.applicationVersion = 1;
     strcpy(ci.applicationInfo.engineName, "GIANTS Engine 10 + fs25vr");
     ci.applicationInfo.apiVersion = XR_API_VERSION_1_0;
-    ci.enabledExtensionCount = 1;
-    ci.enabledExtensionNames = exts;
+    ci.enabledExtensionCount = (uint32_t)exts.size();
+    ci.enabledExtensionNames = exts.data();
     XR_CHECK(xrCreateInstance(&ci, &S.instance));
 
     XrInstanceProperties ip{XR_TYPE_INSTANCE_PROPERTIES};
@@ -484,6 +578,10 @@ bool InitSession()
         Log("OpenXR: no usable swapchain format");
         snprintf(S.status, sizeof(S.status), "no usable swapchain format");
         return false;
+    }
+    if (S.depthExt && std::find(formats.begin(), formats.end(), (int64_t)DXGI_FORMAT_D32_FLOAT) == formats.end()) {
+        Log("depth layer: the runtime offers no 32-bit depth swapchains; depth layer off");
+        S.depthExt = false;
     }
     if (!S.blit.Init(S.device, S.chainFormat)) {
         snprintf(S.status, sizeof(S.status), "blit init failed");
@@ -568,6 +666,11 @@ bool EnsureSwapchains(UINT w, UINT h)
         !CreateChain(S.quad, w, h, 16, 28, S.async ? 1 : 0))
         return false;
     Log("OpenXR swapchains created %ux%u", w, h);
+    if (S.depthExt && S.async) {
+        S.depthOn = CreateDepthChain(S.eyes[0], w, h, sets) && CreateDepthChain(S.eyes[1], w, h, sets) &&
+                    vrs::EnableDepthCapture(true);
+        Log("depth layer: %s", S.depthOn ? "depth swapchains created" : "off");
+    }
     return true;
 }
 
@@ -600,13 +703,14 @@ void BeginFrame()
     }
     S.frameBegun = true;
 
-    if (S.recenterPending) {
+    if (S.recenterPending && S.predictedTime >= S.recenterAfter) {
         XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
         if (XR_SUCCEEDED(xrLocateSpace(S.view, S.local, S.predictedTime, &loc)) &&
             (loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) &&
             (loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)) {
             S.recenter = YawOnly(loc.pose);
             S.recenterPending = false;
+            S.menuPlaced = false;  // recentring inside a menu brings it back in front
             Log("recentred at (%.2f %.2f %.2f)", S.recenter.position.x, S.recenter.position.y,
                 S.recenter.position.z);
         }
@@ -654,9 +758,17 @@ void PollEvents()
             S.instance = XR_NULL_HANDLE;
             S.nextInitAttempt = S.presentCount + 600;
             break;
-        case XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING:
-            S.recenterPending = true;
+        case XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING: {
+            // the runtime recentred (e.g. the headset's own recentre); the LOCAL space only moves
+            // at changeTime, so recentring earlier would measure the head in the old space
+            auto* e = (XrEventDataReferenceSpaceChangePending*)&ev;
+            if (e->referenceSpaceType == XR_REFERENCE_SPACE_TYPE_LOCAL) {
+                S.recenterPending = true;
+                S.recenterAfter = e->changeTime;
+                Log("runtime recentred its tracking space; recentring when it takes effect");
+            }
             break;
+        }
         default:
             break;
         }
@@ -723,7 +835,7 @@ void RecordMirror(ID3D12Resource* bb, Mirror mode)
 }
 
 bool CopyToChain(Chain& chain, ID3D12Resource* bb, DXGI_FORMAT bbFormat, bool sampleMarker = false,
-                 Mirror mirror = Mirror::None, const CursorDraw* cursor = nullptr)
+                 Mirror mirror = Mirror::None, const CursorDraw* cursor = nullptr, ID3D12Resource* depth = nullptr)
 {
     // Async mode draws into the chain's staging texture and never calls OpenXR here: on some
     // runtimes (Quest via Steam Link) swapchain calls block until the next headset refresh, which
@@ -791,6 +903,17 @@ bool CopyToChain(Chain& chain, ID3D12Resource* bb, DXGI_FORMAT bbFormat, bool sa
     b.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
     S.cl->ResourceBarrier(1, &b);
     RecordMirror(bb, mirror);
+    if (depth && S.async && chain.depthStaging[chain.writeSet]) {
+        // this frame's captured scene depth goes with its image (both rest in COPY_DEST)
+        D3D12_RESOURCE_BARRIER d = b;
+        d.Transition.pResource = depth;
+        d.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        d.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        S.cl->ResourceBarrier(1, &d);
+        S.cl->CopyResource(chain.depthStaging[chain.writeSet], depth);
+        std::swap(d.Transition.StateBefore, d.Transition.StateAfter);
+        S.cl->ResourceBarrier(1, &d);
+    }
     S.cl->Close();
     ID3D12CommandList* lists[] = {S.cl};
     S.queue->ExecuteCommandLists(1, lists);
@@ -817,11 +940,14 @@ void ComputeProjection(const XrFovf& eye, float aspect, EyeView& out, XrFovf& re
         lastLog = GetTickCount64();
         Log("eye fov (deg): left %.1f right %.1f up %.1f down %.1f; symmetric=%d", eye.angleLeft * 57.2958f,
             eye.angleRight * 57.2958f, eye.angleUp * 57.2958f, eye.angleDown * 57.2958f, g_config.symmetricFrustum);
-        if (g_config.symmetricFrustum && S.recW && S.recH) {
-            // window size giving the runtime's recommended pixel density over the centred frustum
-            float hw = 2.0f * std::max(r, -l) / (r - l), hh = 2.0f * std::max(u, -d) / (u - d);
+        if (S.recW && S.recH) {
+            // window size giving the runtime's recommended pixel density over the frustum rendered
+            float hw = 1.0f, hh = 1.0f;
+            if (g_config.symmetricFrustum) hw = 2.0f * std::max(r, -l) / (r - l), hh = 2.0f * std::max(u, -d) / (u - d);
             UINT w = ((UINT)(S.recW * hw) + 7) & ~7u, h = ((UINT)(S.recH * hh) + 7) & ~7u;
-            Log("  recommended render size for the centred frustum: %ux%u (current %ux%u)", w, h, S.bbW, S.bbH);
+            Log("  recommended render size for the %s frustum: %ux%u (current %ux%u)",
+                g_config.symmetricFrustum ? "centred" : "exact", w, h, S.bbW, S.bbH);
+            mode::SaveMeasuredSize(w, h, S.bbW, S.bbH);
         }
     }
     if (g_config.symmetricFrustum) {
@@ -930,6 +1056,13 @@ void DumpBackbuffer(ID3D12Resource* bb, int eye)
 bool TryInit()
 {
     if (S.fatal || !S.device || !S.queue) return false;
+    if (!mode::VrWanted()) {
+        // flat play: never start OpenXR (it would start SteamVR); the game runs as without the mod
+        S.fatal = true;
+        snprintf(S.status, sizeof(S.status), "flat play (no headset at start)");
+        Log("flat play: VR is not started this session");
+        return false;
+    }
     if (S.presentCount < S.nextInitAttempt) return false;
     S.nextInitAttempt = S.presentCount + 300;
     if (!InitGpu()) {
@@ -967,6 +1100,7 @@ void OnSwapChainCreated(ID3D12CommandQueue* queue, IDXGISwapChain* swap)
     Log("swap chain created (queue %p, device %p)", queue, dev);
     prof::Init(dev, queue);
     prof::HookQueue(queue);
+    vrs::Init(dev, queue);
 }
 
 void OnPresentImpl(IDXGISwapChain* swap, LARGE_INTEGER onPresentStart);
@@ -977,6 +1111,7 @@ void OnPresent(IDXGISwapChain* swap)
     std::lock_guard<std::recursive_mutex> lock(S.mtx);
     LARGE_INTEGER onPresentStart = Now();
     S.tLockWait += Seconds(lockStart, onPresentStart);
+    vrs::SetPresenting(true);
     S.cur = prof::CpuFrame{};
     S.curFrame = S.presentCount;
     UpdateMouseClip();
@@ -986,6 +1121,7 @@ void OnPresent(IDXGISwapChain* swap)
     }
     prof::GameWorkDone(S.curFrame);
     OnPresentImpl(swap, onPresentStart);
+    if (S.running) vrs::Update(S.bbW, S.bbH, S.lag == 0);
     prof::VrWorkDone(S.curFrame);
     S.tPresentStart = Now();
     S.cur.submit = Seconds(onPresentStart, S.tPresentStart);
@@ -1033,9 +1169,12 @@ void CopyFrame(IDXGISwapChain* swap)
             }
             const bool closer = IsSecondOfPair(rec.frame);  // completes a pair
             if (S.async && !closer) S.pairMask = 0;  // a new pair starts
-            if (CopyToChain(S.eyes[rec.eye], bb, desc.Format, S.calibrating, m, &cursor)) {
+            ID3D12Resource* depth = nullptr;
+            if (S.depthOn) vrs::TakeDepth(rec.eye, &depth);
+            if (CopyToChain(S.eyes[rec.eye], bb, desc.Format, S.calibrating, m, &cursor, depth)) {
                 if (S.async) {  // the compositor submits complete pairs (and sets eyeValid/eyePose)
                     S.pairMask |= 1 << rec.eye;
+                    S.pairDepth[rec.eye] = depth != nullptr;
                     S.pairPose[rec.eye] = rec.pose;
                     S.pairFov[rec.eye] = rec.fov;
                     if (closer) {
@@ -1045,6 +1184,7 @@ void CopyFrame(IDXGISwapChain* swap)
                             for (int e = 0; e < 2; e++) {
                                 S.readyPose[e] = S.pairPose[e];
                                 S.readyFov[e] = S.pairFov[e];
+                                S.readyDepth[e] = S.pairDepth[e];
                                 S.eyes[e].writeSet = set ^ 1;  // the next pair goes into the other textures
                             }
                             S.pairReady = true;
@@ -1064,6 +1204,7 @@ void CopyFrame(IDXGISwapChain* swap)
                 S.quadValid = true;
         }
         S.showStereo = stereo;
+        if (stereo) S.menuPlaced = false;  // the next menu opens where the player then faces
         S.lastWasStereo = stereo;
         if (!stereo) S.mirrorValid = false;
         if (g_config.debugLog)
@@ -1094,12 +1235,12 @@ void SubmitFrame()
             proj.views = pv;
             layers.push_back((XrCompositionLayerBaseHeader*)&proj);
         } else if (!S.showStereo && S.quadValid && S.quad.handle) {
-            XrPosef offset{{0, 0, 0, 1}, {0, 0, -g_config.menuDistance}};
+            PlaceMenu(S.view, S.local, S.predictedTime);
             quad.space = S.local;
             quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
             quad.subImage.swapchain = S.quad.handle;
             quad.subImage.imageRect = {{0, 0}, {(int32_t)S.quad.w, (int32_t)S.quad.h}};
-            quad.pose = PoseCompose(S.recenter, offset);
+            quad.pose = S.menuPose;
             quad.size = {g_config.menuWidth, g_config.menuWidth * (float)S.quad.h / (float)S.quad.w};
             layers.push_back((XrCompositionLayerBaseHeader*)&quad);
         }
@@ -1118,7 +1259,8 @@ void SubmitFrame()
 // Compositor thread: copies each marked staging texture into its acquired swapchain image.
 // Called with the state lock held, so the game thread cannot draw into a staging texture until
 // the copy has been submitted (the GPU executes the queue in submission order).
-int RecordStagingCopies(Chain* chains[3], const bool copy[3], const uint32_t idx[3], const int set[3])
+int RecordStagingCopies(Chain* chains[3], const bool copy[3], const uint32_t idx[3], const int set[3],
+                        const bool dcopy[2], const uint32_t didx[2])
 {
     if (!S.cList) {
         for (auto& a : S.cAlloc)
@@ -1161,6 +1303,27 @@ int RecordStagingCopies(Chain* chains[3], const bool copy[3], const uint32_t idx
         S.cList->ResourceBarrier(2, b);
         n++;
     }
+    for (int i = 0; i < 2; i++) {
+        if (!dcopy[i]) continue;
+        ID3D12Resource* img = chains[i]->depthImages[didx[i]];
+        ID3D12Resource* src = chains[i]->depthStaging[set[i]];
+        D3D12_RESOURCE_BARRIER b[2] = {};
+        for (auto& x : b) {
+            x.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            x.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        }
+        b[0].Transition.pResource = src;  // depth staging rests in COPY_DEST
+        b[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        b[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        b[1].Transition.pResource = img;  // depth swapchain images are handed out in DEPTH_WRITE
+        b[1].Transition.StateBefore = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+        b[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+        S.cList->ResourceBarrier(2, b);
+        S.cList->CopyResource(img, src);
+        std::swap(b[0].Transition.StateBefore, b[0].Transition.StateAfter);
+        std::swap(b[1].Transition.StateBefore, b[1].Transition.StateAfter);
+        S.cList->ResourceBarrier(2, b);
+    }
     S.cList->Close();
     ID3D12CommandList* lists[] = {S.cList};
     S.queue->ExecuteCommandLists(1, lists);
@@ -1179,6 +1342,7 @@ void CompositorFrame()
     XrSession session;
     XrSpace local, view;
     bool wantRecenter;
+    XrTime recenterAfter;
     {
         std::lock_guard<std::recursive_mutex> lock(S.mtx);
         if (!S.running) return;
@@ -1186,6 +1350,7 @@ void CompositorFrame()
         local = S.local;
         view = S.view;
         wantRecenter = S.recenterPending;
+        recenterAfter = S.recenterAfter;
     }
 
     XrFrameWaitInfo wi{XR_TYPE_FRAME_WAIT_INFO};
@@ -1206,7 +1371,8 @@ void CompositorFrame()
     }
     LARGE_INTEGER b1 = Now();
     XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
-    bool recentred = wantRecenter && XR_SUCCEEDED(xrLocateSpace(view, local, fs.predictedDisplayTime, &loc)) &&
+    bool recentred = wantRecenter && fs.predictedDisplayTime >= recenterAfter &&
+                     XR_SUCCEEDED(xrLocateSpace(view, local, fs.predictedDisplayTime, &loc)) &&
                      (loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) &&
                      (loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT);
 
@@ -1214,11 +1380,14 @@ void CompositorFrame()
     //    does not rebuild them until this frame has been submitted.
     Chain* chains[3] = {&S.eyes[0], &S.eyes[1], &S.quad};
     bool copy[3] = {false, false, false};
+    bool dcopy[2] = {false, false};
     {
         std::lock_guard<std::recursive_mutex> lock(S.mtx);
         S.compUsingChains = true;
         for (int i = 0; i < 2; i++) copy[i] = S.pairReady && chains[i]->handle && chains[i]->staging[1];
         copy[2] = chains[2]->staged && chains[2]->handle && chains[2]->staging[0];
+        for (int i = 0; i < 2; i++)
+            dcopy[i] = copy[i] && S.depthOn && S.readyDepth[i] && chains[i]->depthHandle && chains[i]->depthStaging[1];
     }
 
     // 2. get free swapchain images (may block on some runtimes - this thread only, never the game)
@@ -1236,6 +1405,19 @@ void CompositorFrame()
             copy[i] = false;
         }
     }
+    uint32_t didx[2] = {};
+    for (int i = 0; i < 2; i++) {
+        if (!dcopy[i] || !copy[i]) { dcopy[i] = false; continue; }
+        XrSwapchainImageAcquireInfo ai{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+        if (XR_FAILED(xrAcquireSwapchainImage(chains[i]->depthHandle, &ai, &didx[i]))) { dcopy[i] = false; continue; }
+        XrSwapchainImageWaitInfo wi2{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+        wi2.timeout = 100000000;  // 100 ms
+        if (XR_FAILED(xrWaitSwapchainImage(chains[i]->depthHandle, &wi2))) {
+            XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+            xrReleaseSwapchainImage(chains[i]->depthHandle, &ri);
+            dcopy[i] = false;
+        }
+    }
     LARGE_INTEGER a1 = Now();
 
     // 3. under the lock (so the game cannot overwrite a staging texture before the copy executes):
@@ -1243,6 +1425,8 @@ void CompositorFrame()
     XrCompositionLayerProjection proj{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
     XrCompositionLayerProjectionView pv[2] = {{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},
                                               {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
+    XrCompositionLayerDepthInfoKHR depthInfo[2] = {{XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR},
+                                                   {XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR}};
     XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
     XrCompositionLayerBaseHeader* layers[1];
     uint32_t layerCount = 0;
@@ -1253,12 +1437,15 @@ void CompositorFrame()
         // the newest pair: the game may have published another since step 1 (into the other
         // staging textures), which is read together with its poses here under the lock
         const int set[3] = {S.readySet, S.readySet, 0};
-        if (copy[0] || copy[1] || copy[2]) copied = RecordStagingCopies(chains, copy, idx, set);
+        // the pair read here may be newer than in step 1: its depth may be missing
+        bool dnow[2] = {dcopy[0] && S.readyDepth[0], dcopy[1] && S.readyDepth[1]};
+        if (copy[0] || copy[1] || copy[2]) copied = RecordStagingCopies(chains, copy, idx, set, dnow, didx);
         for (int e = 0; e < 2; e++)
             if (copy[e]) {
                 S.eyePose[e] = S.readyPose[e];
                 S.eyeFov[e] = S.readyFov[e];
                 S.eyeValid[e] = true;
+                S.eyeDepth[e] = dnow[e];
             }
         if (copy[0] || copy[1]) S.pairReady = false;
         if (copy[2]) {
@@ -1274,6 +1461,7 @@ void CompositorFrame()
         if (recentred) {
             S.recenter = YawOnly(loc.pose);
             S.recenterPending = false;
+            S.menuPlaced = false;  // recentring inside a menu brings it back in front
             Log("recentred at (%.2f %.2f %.2f)", S.recenter.position.x, S.recenter.position.y, S.recenter.position.z);
         }
         if (S.shouldRender || g_config.forceRender) {
@@ -1285,16 +1473,33 @@ void CompositorFrame()
                     pv[e].subImage.imageRect = {{0, 0}, {(int32_t)S.eyes[e].w, (int32_t)S.eyes[e].h}};
                 }
                 proj.space = local;
+                if (S.depthOn && S.eyeDepth[0] && S.eyeDepth[1]) {
+                    // the game's depth (world units, maybe reversed) with each eye: lets the runtime
+                    // reproject near objects correctly when it fills in frames
+                    float scale = g_config.worldScale;
+                    float n = S.nearClip / scale, f = S.farClip / scale;
+                    bool reversed = vrs::DepthClearValue() == 0;
+                    for (int e = 0; e < 2; e++) {
+                        depthInfo[e].subImage.swapchain = S.eyes[e].depthHandle;
+                        depthInfo[e].subImage.imageRect = pv[e].subImage.imageRect;
+                        depthInfo[e].minDepth = 0.0f;
+                        depthInfo[e].maxDepth = 1.0f;
+                        depthInfo[e].nearZ = reversed ? f : n;
+                        depthInfo[e].farZ = reversed ? n : f;
+                        pv[e].next = &depthInfo[e];
+                    }
+                }
+                proj.space = local;
                 proj.viewCount = 2;
                 proj.views = pv;
                 layers[layerCount++] = (XrCompositionLayerBaseHeader*)&proj;
             } else if (!S.showStereo && S.quadValid && S.quad.handle) {
-                XrPosef offset{{0, 0, 0, 1}, {0, 0, -g_config.menuDistance}};
+                PlaceMenu(view, local, fs.predictedDisplayTime);
                 quad.space = local;
                 quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
                 quad.subImage.swapchain = S.quad.handle;
                 quad.subImage.imageRect = {{0, 0}, {(int32_t)S.quad.w, (int32_t)S.quad.h}};
-                quad.pose = PoseCompose(S.recenter, offset);
+                quad.pose = S.menuPose;
                 quad.size = {g_config.menuWidth, g_config.menuWidth * (float)S.quad.h / (float)S.quad.w};
                 layers[layerCount++] = (XrCompositionLayerBaseHeader*)&quad;
             }
@@ -1306,6 +1511,11 @@ void CompositorFrame()
         if (copy[i]) {
             XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
             xrReleaseSwapchainImage(chains[i]->handle, &ri);
+        }
+    for (int i = 0; i < 2; i++)
+        if (dcopy[i]) {
+            XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+            xrReleaseSwapchainImage(chains[i]->depthHandle, &ri);
         }
     XrFrameEndInfo fe{XR_TYPE_FRAME_END_INFO};
     fe.displayTime = fs.predictedDisplayTime;
@@ -1449,6 +1659,9 @@ void OnPostPresent()
     }
     S.tPresentStart.QuadPart = 0;
     S.presentCount++;
+    // the next frame is drawn for this eye (frames of a 3D view follow each other)
+    vrs::SetFrameEye(S.running && S.lastWasStereo ? EyeOfFrame(S.presentCount) : -1);
+    vrs::SetPresenting(false);
     S.cur.wait = 0;
     if (S.running && !S.async) BeginFrame();
     prof::EndFrame(S.curFrame, S.cur);
@@ -1511,6 +1724,11 @@ bool GetView(EyeView& out)
         S.pairViews[0] = views[0];
         S.pairViews[1] = views[1];
         S.pairTime = li.displayTime;
+        float dx = views[1].pose.position.x - views[0].pose.position.x;
+        float dy = views[1].pose.position.y - views[0].pose.position.y;
+        float dz = views[1].pose.position.z - views[0].pose.position.z;
+        float ipd = sqrtf(dx * dx + dy * dy + dz * dz);
+        if (ipd > 0.04f && ipd < 0.09f) S.ipd = ipd;
         S.pairViewFrame = target;
     }
 
@@ -1519,6 +1737,14 @@ bool GetView(EyeView& out)
     rec.eye = eye;
     rec.pose = views[eye].pose;
     ComputeProjection(views[eye].fov, (float)S.bbW / (float)S.bbH, out, rec.fov);
+    const XrFovf& af = views[eye].fov;
+    const float actualTan[4] = {tanf(af.angleLeft), tanf(af.angleRight), tanf(af.angleDown), tanf(af.angleUp)};
+    const float renderedTan[4] = {tanf(rec.fov.angleLeft), tanf(rec.fov.angleRight), tanf(rec.fov.angleDown),
+                                  tanf(rec.fov.angleUp)};
+    vrs::SetEyeFov(eye, actualTan, renderedTan);
+    memcpy(S.hudActual[eye], actualTan, sizeof(actualTan));
+    memcpy(S.hudRendered[eye], renderedTan, sizeof(renderedTan));
+    S.hudValid[eye] = true;
 
     XrPosef p = PoseCompose(PoseInverse(S.recenter), views[eye].pose);
     float s = g_config.worldScale;
@@ -1543,6 +1769,105 @@ void SetSymmetricFrustum(bool on)
     g_config.symmetricFrustum = on;
     S.cachedFrame = ~0ull;
     Log("symmetric frustum %s", on ? "on" : "off");
+}
+
+void SetSyncPhase(int phase)
+{
+    std::lock_guard<std::recursive_mutex> lock(S.mtx);
+    g_config.syncPhase = phase & 1;
+    Log("eye sync phase %d", g_config.syncPhase);
+}
+
+bool GetHudRect(float rect[4])
+{
+    std::lock_guard<std::recursive_mutex> lock(S.mtx);
+    if (!S.hudValid[0] || !S.hudValid[1]) return false;
+    // Screen-space HUD is drawn at the same place in both images, so it must lie in the part of
+    // the image both eyes see, shrunk to the comfortable central share of the field of view.
+    const float f = g_config.hudArea;
+    float x0 = -1e9f, x1 = 1e9f, y0 = -1e9f, y1 = 1e9f;  // in screen units 0..1, y up
+    for (int e = 0; e < 2; e++) {
+        const float* a = S.hudActual[e];
+        const float* r = S.hudRendered[e];
+        float w = r[1] - r[0], h = r[3] - r[2];
+        if (w <= 0 || h <= 0) return false;
+        x0 = std::max(x0, (a[0] * f - r[0]) / w);
+        x1 = std::min(x1, (a[1] * f - r[0]) / w);
+        y0 = std::max(y0, (a[2] * f - r[2]) / h);
+        y1 = std::min(y1, (a[3] * f - r[2]) / h);
+    }
+    if (x1 - x0 < 0.1f || y1 - y0 < 0.1f) return false;
+    // comfortable viewing sits a little below straight ahead (and headsets often aim slightly up)
+    y0 -= g_config.hudLower;
+    y1 -= g_config.hudLower;
+    rect[0] = std::clamp(x0, 0.0f, 0.45f);
+    rect[1] = std::clamp(x1, 0.55f, 1.0f);
+    rect[2] = std::clamp(y0, 0.0f, 0.45f);
+    rect[3] = std::clamp(y1, std::min(0.55f, rect[2] + 0.1f), 1.0f);
+    return true;
+}
+
+void SetDepthRange(float nearClip, float farClip)
+{
+    if (!(nearClip > 0.0f) || !(farClip > nearClip)) return;
+    std::lock_guard<std::recursive_mutex> lock(S.mtx);
+    S.nearClip = nearClip;
+    S.farClip = farClip;
+}
+
+void SetWorldScale(float scale)
+{
+    std::lock_guard<std::recursive_mutex> lock(S.mtx);
+    g_config.worldScale = std::clamp(scale, 0.5f, 2.0f);
+    S.cachedFrame = ~0ull;  // the next view uses it
+    Log("world scale %.2f", g_config.worldScale);
+}
+
+float GetWorldScale()
+{
+    std::lock_guard<std::recursive_mutex> lock(S.mtx);
+    return g_config.worldScale;
+}
+
+void SetHudDepth(float depth)
+{
+    std::lock_guard<std::recursive_mutex> lock(S.mtx);
+    g_config.hudDepth = depth > 0.0f ? std::clamp(depth, 0.3f, 100.0f) : 0.0f;
+}
+
+void SetHudLower(float lower)
+{
+    std::lock_guard<std::recursive_mutex> lock(S.mtx);
+    g_config.hudLower = std::clamp(lower, -0.3f, 0.3f);
+}
+
+int GetHudEye() { return g_config.hudEye; }
+
+void SetHudArea(float area)
+{
+    std::lock_guard<std::recursive_mutex> lock(S.mtx);
+    g_config.hudArea = std::clamp(area, 0.0f, 1.0f);
+}
+
+bool GetHudShift(float shift[2])
+{
+    std::lock_guard<std::recursive_mutex> lock(S.mtx);
+    if (!S.hudValid[0] || !S.hudValid[1] || g_config.hudDepth <= 0.0f) return false;
+    // A point straight ahead at hudDepth lies ipd/2 to the right of the left eye's view axis and
+    // to the left of the right eye's: shift each image's HUD by that, in screen units.
+    float t = 0.5f * S.ipd / g_config.hudDepth;
+    for (int e = 0; e < 2; e++) {
+        float w = S.hudRendered[e][1] - S.hudRendered[e][0];
+        if (w <= 0) return false;
+        shift[e] = (e == 0 ? t : -t) / w;
+    }
+    return true;
+}
+
+int GetSyncPhase()
+{
+    std::lock_guard<std::recursive_mutex> lock(S.mtx);
+    return g_config.syncPhase;
 }
 
 void RequestRecenter()
